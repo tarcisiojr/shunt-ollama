@@ -1,0 +1,14 @@
+shunt-ollama
+Copyright 2026 Tarcísio Jr
+
+Este produto é um port do plugin "shunt" de:
+
+  Spotify AB — spotify/portal-ai-plugins
+  https://github.com/spotify/portal-ai-plugins
+  Licenciado sob Apache License 2.0
+
+Do original vieram o desenho (hooks de PreToolUse que interceptam leituras
+grandes e as delegam a um modelo de apoio), o conceito de "modes" como system
+prompt e o formato de mensagem em tags <file path="...">. O transporte foi
+trocado do Portal/AiKA para a API local do Ollama, e os hooks foram reescritos
+em Python nesta versão.

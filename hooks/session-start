@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Hook SessionStart: injeta a regra de roteamento de leitura no contexto.
+
+Sem isso o modelo só descobre o shunt quando um deny acontece, e aí tende a
+fatiar o arquivo em vez de delegar. Também registra se o Ollama está de pé.
+"""
+
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+
+import shunt_common as sc  # noqa: E402
+
+
+def routing_text(ollama_up: bool) -> str:
+    status = ("Ollama disponível." if ollama_up else
+              "Ollama INDISPONÍVEL: os bloqueios ficam desativados até "
+              "`ollama serve` responder.")
+    return (
+        "[shunt-ollama] Roteamento de leitura de arquivos.\n"
+        f"- Read/cat/head/tail/sed -n/awk (inclusive dentro de ctx_batch_execute) "
+        f"são BLOQUEADOS acima de {sc.MIN_LINES} linhas efetivas, e também "
+        "quando a soma das fatias já lidas do mesmo arquivo na sessão passa "
+        "desse limiar. Fatiar com offset/limit ou sed -n não contorna.\n"
+        "- Para entender, resumir ou responder perguntas sobre arquivo grande, "
+        "diff grande ou vários arquivos, delegue ao modelo local:\n"
+        f"    {sc.BULK_READ} --question \"<pergunta específica>\" --paths <arquivos>\n"
+        "  Variantes: --cmd \"git diff main\" | --glob 'src/**/*.rs' | --stdin. "
+        "A resposta vem em bullets `Nome (path:Lini-Lfim)`.\n"
+        f"- Depois, para editar, Read com offset/limit de até {sc.EDIT_WINDOW} "
+        "linhas só no trecho apontado.\n"
+        "- Para LOCALIZAR um símbolo use grep/rg (ou ctx_search), nunca cat.\n"
+        f"- {status}"
+    )
+
+
+def main() -> None:
+    data = sc.read_hook_input()
+    session = data.get("session_id") or ""
+    with sc.State(session) as state:
+        up = state.ollama_ok()
+    sc.log(session, "SessionStart", "info", "ollama-up" if up else "ollama-down")
+    out = {"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                  "additionalContext": routing_text(up)}}
+    print(json.dumps(out, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

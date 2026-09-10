@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Hook PreToolUse para Bash e para as ferramentas de shell do context-mode.
+
+Analisa cada comando (cat, head, tail, sed -n, awk, rtk read...) e calcula
+quantas linhas de cada arquivo entrariam no contexto. Cobre `cd X && cat f`,
+`2>/dev/null`, pipes com head/sed e os `commands[]` do ctx_batch_execute.
+"""
+
+import os
+import sys
+from typing import List
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+
+import shunt_common as sc  # noqa: E402
+from parse_reads import parse_reads  # noqa: E402
+
+
+def collect_commands(tool_name: str, tool_input: dict) -> List[str]:
+    """Extrai os comandos shell conforme a ferramenta interceptada."""
+    if tool_name == "Bash":
+        cmd = tool_input.get("command")
+        return [cmd] if cmd else []
+    if tool_name.endswith("ctx_batch_execute"):
+        return [c.get("command", "") for c in tool_input.get("commands") or []
+                if isinstance(c, dict) and c.get("command")]
+    if tool_name.endswith("ctx_execute"):
+        lang = (tool_input.get("language") or "").lower()
+        code = tool_input.get("code") or ""
+        return [code] if code and lang in ("shell", "bash", "sh", "zsh") else []
+    return []
+
+
+def main() -> None:
+    data = sc.read_hook_input()
+    tool_name = data.get("tool_name") or "Bash"
+    tool_input = data.get("tool_input") or {}
+    session = data.get("session_id") or ""
+    cwd = data.get("cwd") or os.getcwd()
+
+    commands = collect_commands(tool_name, tool_input)
+    if not commands:
+        sc.allow()
+
+    requests = {}
+    for command in commands:
+        reads, notes = parse_reads(command, cwd)
+        for note in notes:
+            sc.log(session, tool_name, "skip", note)
+        for path, reqs in reads.items():
+            requests.setdefault(path, []).extend(reqs)
+    sc.decide(session, tool_name, requests)
+
+
+if __name__ == "__main__":
+    main()
