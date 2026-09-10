@@ -2,7 +2,10 @@
 """Resume o log do shunt: decisões dos hooks, delegações ao bulk-read e tokens
 que ficaram fora do contexto do Claude.
 
-Uso: shunt-stats [--log CAMINHO] [--since 2026-09-01]
+A primeira seção compara versões do plugin, para responder se uma mudança
+surtiu efeito sem depender de adivinhar pelo timestamp.
+
+Uso: shunt-stats [--log CAMINHO] [--since 2026-09-01] [--version 0.4.0]
 """
 
 import argparse
@@ -11,21 +14,27 @@ import datetime as dt
 import os
 import sys
 
-DEFAULT_LOG = os.environ.get("SHUNT_HOOK_LOG") or os.path.expanduser("~/.claude/shunt.log")
+DEFAULT_LOG = os.environ.get("SHUNT_HOOK_LOG") or os.path.expanduser(
+    "~/.claude/shunt.log")
 CONVERSION_WINDOW = dt.timedelta(minutes=10)
+TOKENS_PER_LINE = 12
+# Linhas de 8 colunas vêm de antes de a versão ser registrada.
+LEGACY_VERSION = "<=0.3.0"
+NOT_HOOK = ("bulk-read", "SessionStart")
 
 
 def parse_line(line):
     cols = line.rstrip("\n").split("\t")
-    if len(cols) != 8:
-        return None  # formato antigo (0.1.0) ou linha corrompida
+    if len(cols) not in (8, 9):
+        return None  # formato 0.1.0 ou linha corrompida
     try:
         ts = dt.datetime.fromisoformat(cols[0])
     except ValueError:
         return None
     return {"ts": ts, "session": cols[1], "tool": cols[2], "decision": cols[3],
             "reason": cols[4], "path": cols[5], "total": int(cols[6] or 0),
-            "eff": int(cols[7] or 0)}
+            "eff": int(cols[7] or 0),
+            "version": cols[8] if len(cols) == 9 else LEGACY_VERSION}
 
 
 def kv(reason):
@@ -37,10 +46,88 @@ def kv(reason):
     return out
 
 
+def version_key(version):
+    """Ordena semver de verdade, deixando <=0.3.0 e dev nas pontas."""
+    if version == LEGACY_VERSION:
+        return (0,)
+    parts = version.split(".")
+    if all(p.isdigit() for p in parts):
+        return (1,) + tuple(int(p) for p in parts)
+    return (2, version)
+
+
+def conversions(denies, bulk_ok):
+    """Negativas seguidas de uma delegação bem-sucedida em até 10 minutos."""
+    times = [r["ts"] for r in bulk_ok]
+    return sum(1 for d in denies
+               if any(d["ts"] <= t <= d["ts"] + CONVERSION_WINDOW for t in times))
+
+
+def summarize(rows):
+    hooks = [r for r in rows if r["tool"] not in NOT_HOOK]
+    denies = [r for r in hooks if r["decision"] == "deny"]
+    bulk = [r for r in rows if r["tool"] == "bulk-read"]
+    bulk_ok = [r for r in bulk if r["decision"] == "ok"]
+    entered = sum(r["eff"] for r in hooks if r["decision"] == "allow")
+    blocked = sum(r["eff"] for r in denies)
+    total = entered + blocked
+    return {
+        "events": len(hooks), "denies": len(denies),
+        "entered": entered, "blocked": blocked,
+        "rate": (100 * blocked / total) if total else 0.0,
+        "delegations": len(bulk_ok), "delegation_errors": len(bulk) - len(bulk_ok),
+        "converted": conversions(denies, bulk_ok),
+        "sessions": len({r["session"] for r in hooks if r["session"] != "-"}),
+        "sent": sum(kv(r["reason"]).get("pin", 0) for r in bulk_ok),
+        "returned": sum(kv(r["reason"]).get("pout", 0) for r in bulk_ok),
+        "seconds": sum(kv(r["reason"]).get("dur", 0) for r in bulk_ok),
+        "files": sum(kv(r["reason"]).get("files", 0) for r in bulk_ok),
+    }
+
+
+def print_version_table(rows):
+    by_version = collections.defaultdict(list)
+    for r in rows:
+        by_version[r["version"]].append(r)
+    versions = sorted(by_version, key=version_key)
+
+    print("Comparação por versão")
+    header = (f"  {'versão':<10} {'eventos':>8} {'negativas':>10} "
+              f"{'entrou':>9} {'bloqueado':>10} {'taxa':>6} "
+              f"{'delegações':>11} {'conversão':>10}")
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for v in versions:
+        s = summarize(by_version[v])
+        conv = (f"{100 * s['converted'] / s['denies']:.0f}%"
+                if s["denies"] else "-")
+        deleg = str(s["delegations"])
+        if s["delegation_errors"]:
+            deleg += f"+{s['delegation_errors']}!"
+        print(f"  {v:<10} {s['events']:>8} {s['denies']:>10} "
+              f"{s['entered']:>9} {s['blocked']:>10} {s['rate']:>5.0f}% "
+              f"{deleg:>11} {conv:>10}")
+
+    if len(versions) > 1:
+        a, b = summarize(by_version[versions[-2]]), summarize(by_version[versions[-1]])
+        print(f"\n  {versions[-2]} -> {versions[-1]}: taxa de bloqueio "
+              f"{a['rate']:.0f}% -> {b['rate']:.0f}%", end="")
+        if a["denies"] and b["denies"]:
+            ca = 100 * a["converted"] / a["denies"]
+            cb = 100 * b["converted"] / b["denies"]
+            print(f", conversão {ca:.0f}% -> {cb:.0f}%", end="")
+        print()
+        if b["events"] < 30:
+            print(f"  Atenção: só {b['events']} eventos na versão mais recente; "
+                  "amostra pequena para concluir.")
+    print()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--log", default=DEFAULT_LOG)
     ap.add_argument("--since", help="AAAA-MM-DD")
+    ap.add_argument("--version", help="filtra uma versão do plugin")
     args = ap.parse_args()
 
     since = dt.datetime.fromisoformat(args.since) if args.since else None
@@ -49,54 +136,61 @@ def main():
         with open(args.log, encoding="utf-8") as fh:
             for line in fh:
                 row = parse_line(line)
-                if row and (since is None or row["ts"] >= since):
-                    rows.append(row)
+                if not row:
+                    continue
+                if since and row["ts"] < since:
+                    continue
+                if args.version and row["version"] != args.version:
+                    continue
+                rows.append(row)
     except OSError:
         sys.exit(f"log não encontrado: {args.log}")
     if not rows:
-        sys.exit("sem registros no formato 0.2.0 (nada interceptado ainda).")
+        sys.exit("sem registros no formato atual (nada interceptado ainda).")
 
-    hooks = [r for r in rows if r["tool"] not in ("bulk-read", "SessionStart")]
-    bulk = [r for r in rows if r["tool"] == "bulk-read" and r["decision"] == "ok"]
+    overall = summarize(rows)
+    print(f"shunt-stats — {rows[0]['ts']:%Y-%m-%d} a {rows[-1]['ts']:%Y-%m-%d} "
+          f"| sessões: {overall['sessions']}\n")
+
+    print_version_table(rows)
+
+    hooks = [r for r in rows if r["tool"] not in NOT_HOOK]
     denies = [r for r in hooks if r["decision"] == "deny"]
 
-    print(f"shunt-stats — {rows[0]['ts']:%Y-%m-%d} a {rows[-1]['ts']:%Y-%m-%d} "
-          f"| sessões: {len({r['session'] for r in hooks if r['session'] != '-'})}")
-    print("\nDecisões dos hooks (ferramenta / decisão / motivo):")
+    print("Decisões dos hooks (versão / ferramenta / decisão / motivo):")
     counter = collections.Counter(
-        (r["tool"], r["decision"], r["reason"].split(":")[0]) for r in hooks)
-    for (tool, dec, reason), n in sorted(counter.items(), key=lambda x: -x[1])[:20]:
-        print(f"  {n:>5}  {tool:<45} {dec:<6} {reason}")
+        (r["version"], r["tool"], r["decision"], r["reason"].split(":")[0])
+        for r in hooks)
+    for (ver, tool, dec, reason), n in sorted(counter.items(),
+                                              key=lambda x: -x[1])[:20]:
+        print(f"  {n:>5}  {ver:<9} {tool:<42} {dec:<6} {reason}")
 
     if denies:
         print("\nArquivos mais bloqueados:")
-        top = collections.Counter(r["path"] for r in denies).most_common(10)
-        for path, n in top:
+        for path, n in collections.Counter(r["path"] for r in denies).most_common(10):
             print(f"  {n:>5}  {path}")
-        blocked_lines = sum(r["eff"] for r in denies)
-        print(f"\nLinhas que os denies impediram de entrar no contexto: {blocked_lines} "
-              f"(~{blocked_lines * 12 // 1} tokens estimados a 12 tokens/linha)")
+        print(f"\nLinhas que os denies impediram de entrar no contexto: "
+              f"{overall['blocked']} (~{overall['blocked'] * TOKENS_PER_LINE} "
+              f"tokens a {TOKENS_PER_LINE} tokens/linha)")
 
-    print(f"\nbulk-read: {len(bulk)} delegação(ões)")
-    if bulk:
-        pin = sum(kv(r["reason"]).get("pin", 0) for r in bulk)
-        pout = sum(kv(r["reason"]).get("pout", 0) for r in bulk)
-        dur = sum(kv(r["reason"]).get("dur", 0) for r in bulk)
-        files = sum(kv(r["reason"]).get("files", 0) for r in bulk)
-        print(f"  arquivos lidos pelo modelo local: {files}")
-        print(f"  tokens enviados ao Ollama (fora do Claude): {pin}")
-        print(f"  tokens devolvidos ao Claude: {pout}")
-        print(f"  economia líquida estimada: {pin - pout} tokens | tempo total: {dur}s")
+    print(f"\nbulk-read: {overall['delegations']} delegação(ões) bem-sucedida(s)"
+          + (f", {overall['delegation_errors']} com erro"
+             if overall["delegation_errors"] else ""))
+    if overall["delegations"]:
+        print(f"  arquivos lidos pelo modelo local: {overall['files']}")
+        print(f"  tokens enviados ao Ollama (fora do Claude): {overall['sent']}")
+        print(f"  tokens devolvidos ao Claude: {overall['returned']}")
+        print(f"  economia líquida estimada: "
+              f"{overall['sent'] - overall['returned']} tokens "
+              f"| tempo total: {overall['seconds']}s")
 
     if denies:
-        converted = 0
-        bulk_times = [r["ts"] for r in bulk]
-        for d in denies:
-            if any(d["ts"] <= t <= d["ts"] + CONVERSION_WINDOW for t in bulk_times):
-                converted += 1
-        pct = 100 * converted / len(denies)
-        print(f"\nConversão: {converted}/{len(denies)} denies ({pct:.0f}%) "
-              "seguidos de bulk-read em até 10 min")
+        pct = 100 * overall["converted"] / len(denies)
+        print(f"\nConversão: {overall['converted']}/{len(denies)} denies "
+              f"({pct:.0f}%) seguidos de bulk-read em até 10 min")
+        if pct < 20:
+            print("  Conversão baixa: os bloqueios estão economizando contexto, "
+                  "mas o Claude está desistindo da informação em vez de delegar.")
 
 
 if __name__ == "__main__":

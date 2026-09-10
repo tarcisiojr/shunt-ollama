@@ -65,6 +65,28 @@ PLUGIN_ROOT = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.dirname(
 BULK_READ = os.path.join(PLUGIN_ROOT, "scripts", "bulk-read")
 
 
+def plugin_version() -> str:
+    """Versão registrada em cada linha do log, para comparar o efeito de uma
+    mudança sem depender de adivinhar pelo timestamp. Durante um update as
+    duas versões convivem: sessões abertas seguem com os hooks antigos."""
+    manifest = os.path.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json")
+    try:
+        with open(manifest, encoding="utf-8") as fh:
+            version = json.load(fh).get("version")
+        if version:
+            return str(version)
+    except (OSError, ValueError):
+        pass
+    # Instalado pelo cache de plugins, o diretório já é a versão.
+    tail = os.path.basename(PLUGIN_ROOT)
+    if tail and tail[0].isdigit():
+        return tail
+    return "dev"
+
+
+VERSION = plugin_version()
+
+
 # --------------------------------------------------------------------------
 # Entrada e saída do hook
 # --------------------------------------------------------------------------
@@ -94,13 +116,16 @@ def deny(reason: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# Log de decisões (TSV: ts, sessão, ferramenta, decisão, motivo, path, total, efetivo)
+# Log de decisões, TSV com 9 colunas:
+#   ts, sessão, ferramenta, decisão, motivo, path, total, efetivo, versão
+# Linhas de 8 colunas são de versões até a 0.3.0 e ainda são lidas pelo
+# shunt-stats, que as agrupa como "<=0.3.0".
 # --------------------------------------------------------------------------
 def log(session: str, tool: str, decision: str, reason: str,
         path: str = "", total: int = 0, effective: int = 0) -> None:
     line = "\t".join([
         time.strftime("%Y-%m-%dT%H:%M:%S"), session or "-", tool, decision,
-        reason, path or "-", str(total), str(effective),
+        reason, path or "-", str(total), str(effective), VERSION,
     ])
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as fh:

@@ -12,7 +12,8 @@
 # cabe em SHUNT_NUM_CTX é fatiado em partes, cada uma com pergunta própria.
 
 set -o pipefail
-. "$(cd "$(dirname "$0")" && pwd)/lib/ollama.sh"
+SHUNT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$SHUNT_ROOT/scripts/lib/ollama.sh"
 
 MODES_DIR="$(cd "$(dirname "$0")/.." && pwd)/modes"
 DEFAULT_QUESTION="Liste os símbolos públicos/exportados com a responsabilidade de cada um, as dependências entre eles e os pontos de entrada."

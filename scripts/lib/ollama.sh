@@ -19,6 +19,25 @@ SHUNT_TIMEOUT_SECONDS="${SHUNT_TIMEOUT_SECONDS:-180}"
 SHUNT_KEEP_ALIVE="${SHUNT_KEEP_ALIVE:-30m}"
 SHUNT_HOOK_LOG="${SHUNT_HOOK_LOG:-$HOME/.claude/shunt.log}"
 
+# Versão gravada em cada linha do log, para comparar o efeito de uma mudança.
+# Mesma fonte que os hooks usam: o manifesto do plugin.
+shunt_version() {
+  local root manifest v
+  root="${CLAUDE_PLUGIN_ROOT:-$SHUNT_ROOT}"
+  if [ -z "$root" ]; then
+    # BASH_SOURCE não existe fora do bash; $0 cobre o caso de ser sourced.
+    root=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." 2>/dev/null && pwd) || root=""
+  fi
+  manifest="$root/.claude-plugin/plugin.json"
+  if [ -r "$manifest" ]; then
+    v=$(jq -r '.version // empty' "$manifest" 2>/dev/null)
+    [ -n "$v" ] && { printf '%s' "$v"; return; }
+  fi
+  v=$(basename "$root")
+  case "$v" in [0-9]*) printf '%s' "$v" ;; *) printf 'dev' ;; esac
+}
+SHUNT_VERSION="${SHUNT_VERSION:-$(shunt_version)}"
+
 # Totais acumulados pelas chamadas desta execução (para o log/stats).
 SHUNT_PIN_TOTAL=0
 SHUNT_POUT_TOTAL=0
@@ -49,11 +68,13 @@ shunt_preflight() {
   return 0
 }
 
-# Linha no mesmo TSV dos hooks: ts, sessão, ferramenta, decisão, motivo, path, total, efetivo.
+# Linha no mesmo TSV dos hooks:
+#   ts, sessão, ferramenta, decisão, motivo, path, total, efetivo, versão
 shunt_log_line() {
   local tool="$1" decision="$2" reason="$3" path="${4:--}" total="${5:-0}" eff="${6:-0}"
-  printf '%s\t-\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" \
-    "$tool" "$decision" "$reason" "$path" "$total" "$eff" >> "$SHUNT_HOOK_LOG" 2>/dev/null
+  printf '%s\t-\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" \
+    "$tool" "$decision" "$reason" "$path" "$total" "$eff" "$SHUNT_VERSION" \
+    >> "$SHUNT_HOOK_LOG" 2>/dev/null
 }
 
 # Uma rodada de chat, sem histórico, contra o modelo local.

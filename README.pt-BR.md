@@ -116,7 +116,11 @@ segunda leitura fecha isso:
 No log inteiro a taxa de bloqueio subiu de 27% para 32%, e os tokens bloqueados de cerca de 78
 mil para 91 mil.
 
-**Suíte de testes.** 39 casos, montados a partir dos comandos exatos que versões anteriores
+**Como conferir isso você mesmo.** A partir da 0.4.0, cada linha do log carrega a versão do
+plugin, e o `shunt-stats` compara versões lado a lado. Os números acima vieram do replay de
+logs reais; os do seu uso saem de `scripts/shunt-stats`.
+
+**Suíte de testes.** 47 casos, montados a partir dos comandos exatos que versões anteriores
 deixaram passar.
 
 ## Como funciona
@@ -274,12 +278,30 @@ errar alguns números de linha, então confira valores exatos antes de um `Edit`
 ```bash
 scripts/shunt-stats
 scripts/shunt-stats --since 2026-09-01
+scripts/shunt-stats --version 0.4.0
 ```
 
-Mostra decisões por ferramenta, arquivos mais bloqueados, tokens delegados ao Ollama contra
-tokens devolvidos ao Claude, e a taxa de conversão de bloqueio em delegação.
+A primeira seção compara versões do plugin, para você saber se uma mudança realmente funcionou
+em vez de adivinhar pelo timestamp:
 
-O log é TSV com oito colunas:
+```text
+Comparação por versão
+  versão      eventos  negativas    entrou  bloqueado   taxa  delegações  conversão
+  <=0.3.0         589         50     17949       6297    26%        0+9!         0%
+  0.4.0            42          8      1120       2240    67%           4        50%
+
+  <=0.3.0 -> 0.4.0: taxa de bloqueio 26% -> 67%, conversão 0% -> 50%
+```
+
+`delegações` conta as execuções bem-sucedidas do `bulk-read`, com `+N!` marcando as que
+falharam. `conversão` é a fração de negativas seguidas de uma delegação em até dez minutos, e é
+o número que diz se o plugin está sendo usado como desvio ou apenas como freio. Amostra abaixo
+de 30 eventos recebe aviso explícito, e conversão abaixo de 20% também.
+
+O resto mostra decisões por ferramenta, arquivos mais bloqueados e tokens delegados ao Ollama
+contra tokens devolvidos ao Claude.
+
+O log é TSV com nove colunas:
 
 | # | Coluna | Conteúdo |
 |---|---|---|
@@ -291,6 +313,12 @@ O log é TSV com oito colunas:
 | 6 | arquivo | caminho absoluto, ou `-` |
 | 7 | total | linhas do arquivo |
 | 8 | efetivo | linhas que entrariam no contexto |
+| 9 | versão | versão do plugin que tomou a decisão |
+
+Linhas gravadas antes da 0.4.0 têm oito colunas. O `shunt-stats` continua lendo essas linhas e
+as agrupa como `<=0.3.0`, o que preserva a linha de base para comparação. Durante uma
+atualização as duas versões aparecem no mesmo log: sessões já abertas seguem com os hooks
+antigos até serem reiniciadas.
 
 Motivos: `always-free` (≤ 25 linhas, nunca contada), `edit-window` (primeira leitura de edição
 do arquivo, livre), `window-counted` (leitura de edição posterior, somada), `counted` (leitura
@@ -328,6 +356,10 @@ Os comentários e a documentação no código estão em português brasileiro.
 
 ## Changelog
 
+- **0.4.0** — cada linha do log carrega a versão do plugin como nona coluna, e o `shunt-stats`
+  compara versões lado a lado, então o efeito de uma mudança passa a ser medido em vez de
+  inferido. Linhas de oito colunas das versões anteriores continuam sendo lidas e agrupadas
+  como `<=0.3.0`.
 - **0.3.0** — a janela de edição passa a contar da segunda leitura de cada arquivo em diante,
   fechando o contorno de fatiar em pedaços de 80 linhas; uma faixa sempre livre de 25 linhas
   mantém a edição cirúrgica possível; as negativas comparam o custo de ler com o de delegar; o

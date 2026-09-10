@@ -223,7 +223,8 @@ class HookEndToEndTest(unittest.TestCase):
 
     def reasons_logged(self):
         with open(self.env["SHUNT_HOOK_LOG"], encoding="utf-8") as fh:
-            return [ln.split("\t")[4] for ln in fh if ln.count("\t") == 7]
+            return [ln.split("\t")[4] for ln in fh
+                    if len(ln.rstrip("\n").split("\t")) in (8, 9)]
 
     # -- Read ---------------------------------------------------------------
     def test_read_completo_nega(self):
@@ -347,12 +348,98 @@ class HookEndToEndTest(unittest.TestCase):
                             {"command": f"cat {self.big}"}, env=env)
         self.assertEqual(self.decision(out), "allow")
 
-    def test_log_registra_decisoes(self):
+    def test_log_registra_decisoes_com_versao(self):
         self.run_hook("check-bash-read", "Bash", {"command": f"cat {self.big}"})
         with open(self.env["SHUNT_HOOK_LOG"], encoding="utf-8") as fh:
             cols = fh.readline().rstrip("\n").split("\t")
-        self.assertEqual(len(cols), 8)
+        self.assertEqual(len(cols), 9)
         self.assertEqual(cols[3], "deny")
+        self.assertEqual(cols[8], sc.VERSION)
+
+    def test_versao_vem_do_manifesto(self):
+        import json as _json
+        manifest = os.path.join(ROOT, ".claude-plugin", "plugin.json")
+        with open(manifest, encoding="utf-8") as fh:
+            self.assertEqual(sc.VERSION, _json.load(fh)["version"])
+
+    def test_versao_cai_para_dev_sem_manifesto(self):
+        code = ("import sys; sys.path.insert(0, %r); import shunt_common as sc; "
+                "print(sc.VERSION)" % os.path.join(ROOT, "hooks", "lib"))
+        env = {**os.environ, "CLAUDE_PLUGIN_ROOT": self.dir}
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(out.stdout.strip(), "dev")
+
+    def test_versao_vem_do_diretorio_no_cache(self):
+        cache = os.path.join(self.dir, "0.9.1")
+        os.makedirs(cache)
+        code = ("import sys; sys.path.insert(0, %r); import shunt_common as sc; "
+                "print(sc.VERSION)" % os.path.join(ROOT, "hooks", "lib"))
+        env = {**os.environ, "CLAUDE_PLUGIN_ROOT": cache}
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(out.stdout.strip(), "0.9.1")
+
+
+class StatsTest(unittest.TestCase):
+    """O agregador precisa ler o formato antigo de 8 colunas junto do novo de
+    9, senão a comparação entre versões perde a linha de base."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.log = os.path.join(self.tmp.name, "shunt.log")
+        rows = [
+            # legado, 8 colunas
+            "2026-09-01T10:00:00\ts1\tBash\tdeny\tsingle-read\t/a.py\t900\t900",
+            "2026-09-01T10:01:00\ts1\tRead\tallow\tcounted\t/a.py\t900\t120",
+            # versionado, 9 colunas
+            "2026-09-02T10:00:00\ts2\tBash\tdeny\tsingle-read\t/b.py\t900\t900\t0.4.0",
+            "2026-09-02T10:02:00\t-\tbulk-read\tok\tfiles=1;pin=9000;pout=300;dur=40"
+            "\t/b.py\t900\t0\t0.4.0",
+            "2026-09-02T10:03:00\ts2\tRead\tallow\talways-free\t/b.py\t900\t20\t0.4.0",
+            # linha corrompida, deve ser ignorada
+            "lixo",
+        ]
+        with open(self.log, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(rows) + "\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_stats(self, *extra):
+        proc = subprocess.run(
+            [os.path.join(ROOT, "scripts", "shunt-stats"), "--log", self.log,
+             *extra], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout
+
+    def test_compara_legado_com_versionado(self):
+        out = self.run_stats()
+        self.assertIn("Comparação por versão", out)
+        self.assertIn("<=0.3.0", out)
+        self.assertIn("0.4.0", out)
+        self.assertIn("-> 0.4.0", out)
+
+    def test_conversao_por_versao(self):
+        out = self.run_stats()
+        linha = next(ln for ln in out.splitlines() if ln.strip().startswith("0.4.0"))
+        self.assertIn("100%", linha)   # o único deny virou delegação
+        legado = next(ln for ln in out.splitlines()
+                      if ln.strip().startswith("<=0.3.0"))
+        self.assertIn("0%", legado)
+
+    def test_filtro_por_versao(self):
+        out = self.run_stats("--version", "0.4.0")
+        self.assertIn("0.4.0", out)
+        self.assertNotIn("<=0.3.0", out)
+
+    def test_delegacao_contabilizada(self):
+        out = self.run_stats()
+        self.assertIn("1 delegação(ões)", out)
+        self.assertIn("9000", out)   # tokens enviados ao Ollama
+
+    def test_alerta_de_amostra_pequena(self):
+        self.assertIn("amostra pequena", self.run_stats())
 
 
 class SessionStartTest(unittest.TestCase):

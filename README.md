@@ -116,7 +116,11 @@ came through it, 80 lines at a time. Counting the window from the second read on
 Across the whole log the block rate went from 27% to 32%, and blocked tokens from roughly 78
 thousand to 91 thousand.
 
-**Test suite.** 39 cases, built from the exact commands that earlier versions let through.
+**How to check this yourself.** From 0.4.0 on, every log line carries the plugin version, and
+`shunt-stats` compares versions side by side. The numbers above were produced by replaying real
+logs; the ones for your own usage come from `scripts/shunt-stats`.
+
+**Test suite.** 47 cases, built from the exact commands that earlier versions let through.
 
 ## How it works
 
@@ -273,12 +277,30 @@ few lines, so verify exact values before an `Edit`.
 ```bash
 scripts/shunt-stats
 scripts/shunt-stats --since 2026-09-01
+scripts/shunt-stats --version 0.4.0
 ```
 
-Shows decisions per tool, most-blocked files, tokens delegated to Ollama against tokens returned
-to Claude, and how often a block converted into a delegation.
+The first section compares plugin versions, so you can tell whether a change actually worked
+instead of guessing from timestamps:
 
-The log is TSV with eight columns:
+```text
+Comparação por versão
+  versão      eventos  negativas    entrou  bloqueado   taxa  delegações  conversão
+  <=0.3.0         589         50     17949       6297    26%        0+9!         0%
+  0.4.0            42          8      1120       2240    67%           4        50%
+
+  <=0.3.0 -> 0.4.0: taxa de bloqueio 26% -> 67%, conversão 0% -> 50%
+```
+
+`delegações` counts successful `bulk-read` runs, with `+N!` marking failures. `conversão` is the
+share of denials followed by a delegation within ten minutes, which is the number that says
+whether the plugin is being used as a detour or merely as a brake. A sample under 30 events
+gets an explicit warning, and conversion under 20% gets one too.
+
+The rest shows decisions per tool, most-blocked files, and tokens delegated to Ollama against
+tokens returned to Claude.
+
+The log is TSV with nine columns:
 
 | # | Column | Content |
 |---|---|---|
@@ -290,6 +312,11 @@ The log is TSV with eight columns:
 | 6 | file | absolute path, or `-` |
 | 7 | total | lines in the file |
 | 8 | effective | lines that would enter the context |
+| 9 | version | plugin version that made the decision |
+
+Lines written before 0.4.0 have eight columns. `shunt-stats` still reads them and groups them as
+`<=0.3.0`, which keeps the baseline for comparison. During an upgrade both versions appear in
+the same log: sessions already open keep running the old hooks until restarted.
 
 Reasons: `always-free` (≤ 25 lines, never counted), `edit-window` (first editing read of a file,
 free), `window-counted` (a later editing read, added to the total), `counted` (a mid-size read,
@@ -328,6 +355,9 @@ Code comments and inline documentation are in Brazilian Portuguese.
 
 ## Changelog
 
+- **0.4.0** — every log line carries the plugin version as a ninth column, and `shunt-stats`
+  compares versions side by side, so the effect of a change is measurable instead of inferred.
+  Eight-column lines from earlier versions are still read and grouped as `<=0.3.0`.
 - **0.3.0** — the editing window now counts from the second read of a file onward, closing the
   80-line slicing bypass; an always-free tier of 25 lines keeps surgical edits possible;
   denials compare the cost of reading against the cost of delegating; the threshold is floored
