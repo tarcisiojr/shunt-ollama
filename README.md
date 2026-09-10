@@ -1,192 +1,195 @@
 # shunt-ollama
 
-Plugin para o [Claude Code](https://claude.com/claude-code) que **impede leituras grandes de
-entrarem no contexto** e as delega a um modelo rodando localmente no [Ollama](https://ollama.com).
+**English** · [Português (Brasil)](README.pt-BR.md)
 
-O modelo local lê o arquivo inteiro e devolve bullets ancorados em número de linha. Só a
-resposta chega ao Claude, que depois abre com `Read` apenas o trecho que precisa editar.
+A [Claude Code](https://claude.com/claude-code) plugin that **keeps large reads out of the
+context window** by delegating them to a model running locally on [Ollama](https://ollama.com).
+
+The local model reads the whole file and returns bullets anchored to line numbers. Only that
+answer reaches Claude, which then opens just the slice it needs to edit.
 
 ```text
-Claude quer ler um arquivo de 4141 linhas
+Claude wants to read a 4141-line file
         │
-        ├─ hook bloqueia ──► bulk-read ──► Ollama (gemma4:e4b) lê as 4141 linhas
+        ├─ hook denies ──► bulk-read ──► Ollama (gemma4:e4b) reads all 4141 lines
         │                                        │
-        └──────────── 40 linhas de bullets ◄─────┘
-                      "- refresh_if_needed (launcher.sh:L1195-L1260): renova o token quando..."
+        └────────── 40 lines of bullets ◄────────┘
+                    "- refresh_if_needed (launcher.sh:L1195-L1260): renews the token when..."
                               │
-                              └─► Read com offset=1195 limit=65 para editar
+                              └─► Read with offset=1195 limit=65 to edit
 ```
 
-## De onde surgiu
+## Where it came from
 
-A Spotify publicou em [`spotify/portal-ai-plugins`](https://github.com/spotify/portal-ai-plugins)
-um plugin chamado `shunt`, que intercepta leituras do Claude Code e as redireciona para o
-Portal/AiKA, a plataforma interna deles. A ideia é boa e não depende da infraestrutura da
-Spotify: qualquer modelo de apoio serve como leitor.
+Spotify published a plugin called `shunt` in
+[`spotify/portal-ai-plugins`](https://github.com/spotify/portal-ai-plugins). It intercepts
+Claude Code's file reads and routes them to Portal/AiKA, their internal platform. The idea is
+good and it does not depend on Spotify's infrastructure: any helper model can be the reader.
 
-Este repositório é um port dessa ideia para o Ollama, cobrindo só o caminho de leitura e
-resumo (o mode `bulk-reader` do original).
+This repository ports that idea to Ollama, covering only the read-and-summarize path (the
+original's `bulk-reader` mode).
 
-**O que veio do original:** o desenho de hooks `PreToolUse` que interceptam leituras grandes,
-o conceito de "mode" como arquivo de system prompt, e o formato de mensagem em tags
-`<file path="...">`.
+**What came from the original:** the design of `PreToolUse` hooks that intercept large reads,
+the notion of a "mode" as a system-prompt file, and the message format built from
+`<file path="...">` tags.
 
-**O que mudou:**
+**What changed:**
 
-| | Original (Spotify) | Aqui |
+| | Original (Spotify) | Here |
 |---|---|---|
-| Transporte | Portal CLI (`aika:invoke-chat`) | API HTTP local do Ollama |
-| Detecção em Bash | regex `^(cat\|head\|tail\|less\|more) ` | parser léxico (`shlex`) por segmento |
-| Limiar | tamanho do arquivo | **linhas efetivas** + acumulado por sessão |
-| Payload | argumento de linha de comando (limitado por `ARG_MAX`) | stdin do `curl` |
-| Numeração | não | `cat -n` antes de enviar |
-| Fontes | arquivos | arquivos, diretórios, globs, saída de comando, stdin |
-| Formato de saída do hook | `{"decision": "allow"}` | `hookSpecificOutput.permissionDecision` |
+| Transport | Portal CLI (`aika:invoke-chat`) | Ollama's local HTTP API |
+| Bash detection | regex `^(cat\|head\|tail\|less\|more) ` | lexical parser (`shlex`), segment by segment |
+| Threshold | file size | **effective lines** plus a per-session running total |
+| Payload | command-line argument, capped by `ARG_MAX` | `curl` stdin |
+| Line numbering | no | `cat -n` before sending |
+| Sources | files | files, directories, globs, command output, stdin |
+| Hook output format | `{"decision": "allow"}` | `hookSpecificOutput.permissionDecision` |
 
-A última linha importa: versões recentes do Claude Code rejeitam o formato antigo com
-`Hook JSON output validation failed`, e um hook que falha na validação **não bloqueia nada**.
+That last row matters. Recent Claude Code versions reject the old format with
+`Hook JSON output validation failed`, and a hook that fails validation **blocks nothing**.
 
-## Por que a versão 0.2.0 existe
+## Why version 0.2.0 exists
 
-A 0.1.0 era um port fiel, com os hooks originais quase intactos. Nos logs de uso real ela
-disparou **uma única vez em duas sessões**, e esse único bloqueio foi contornado: o modelo
-releu o mesmo arquivo em quatro fatias com `sed -n '30,120p'`, `'121,200p'`, `'201,276p'`.
-Leu tudo, gastou os mesmos tokens, e o modelo local nunca foi chamado.
+Version 0.1.0 was a faithful port, with the original hooks nearly untouched. In real usage logs
+it fired **exactly once across two sessions**, and that single block was worked around: the
+model reread the same file in four slices with `sed -n '30,120p'`, `'121,200p'`, `'201,276p'`.
+It read everything, spent the same tokens, and the local model was never called.
 
-A investigação mostrou que quase nenhuma leitura passava por onde os hooks vigiavam:
+The investigation showed that almost no read passed through where the hooks were watching:
 
-- `cd projeto && cat AGENTS.md` não casava com a regex `^cat `
-- `cat arquivo 2>/dev/null` era descartado pelo filtro de redirecionamento
-- `sed -n`, `awk` e `head -150` em loop não eram reconhecidos
-- `Read` com `limit: 620` num arquivo de 1200 linhas passava, porque a regra era
-  "tem `offset` ou `limit`, então é leitura direcionada"
-- leituras feitas por outras ferramentas (MCP de terceiros) ficavam fora do matcher
+- `cd project && cat AGENTS.md` did not match the `^cat ` regex
+- `cat file 2>/dev/null` was discarded by the redirection filter
+- `sed -n`, `awk`, and `head -150` inside a loop went unrecognized
+- `Read` with `limit: 620` on a 1200-line file passed, because the rule was "it has an `offset`
+  or a `limit`, so it must be a targeted read"
+- reads issued by other tools, such as third-party MCP servers, fell outside the matcher
 
-A 0.2.0 reescreve os hooks em Python para fechar essas passagens.
+Version 0.2.0 rewrites the hooks in Python to close those gaps.
 
-## Estatísticas
+## Statistics
 
-**Replay dos hooks 0.2.0 sobre histórico real.** As chamadas de ferramenta de 105 sessões
-gravadas do Claude Code foram reprocessadas pelo parser e pela máquina de decisão, com o
-limiar em 100 linhas:
+**Replaying the 0.2.0 hooks against real history.** Tool calls from 105 recorded Claude Code
+sessions were reprocessed through the parser and the decision logic, with the threshold set to
+100 lines:
 
-| Métrica | Valor |
+| Metric | Value |
 |---|---|
-| Chamadas de ferramenta analisadas | 12.468 |
-| Com leitura de arquivo detectada | 1.354 |
-| Bloqueadas | 364 |
-| Liberadas na janela de edição (≤ 80 linhas) | 1.027 |
-| Liberadas e contabilizadas no acumulado | 66 |
-| Bloqueadas pelo acumulado de fatias | 4 |
-| Linhas que não teriam entrado no contexto | 165.341 |
+| Tool calls analyzed | 12,468 |
+| With a file read detected | 1,354 |
+| Denied | 364 |
+| Allowed within the edit window (≤ 80 lines) | 1,027 |
+| Allowed and counted toward the running total | 66 |
+| Denied by the accumulated slices | 4 |
+| Lines that would not have entered the context | 165,341 |
 
-As 165 mil linhas correspondem a algo entre 1,6 e 2 milhões de tokens, a 10-12 tokens por
-linha de código. O número é conservador: o replay resolve caminhos absolutos, então comandos
-com caminho relativo a um diretório de trabalho antigo contaram como não detectados.
+Those 165 thousand lines amount to somewhere between 1.6 and 2 million tokens, at 10-12 tokens
+per line of code. The figure is conservative: the replay resolves absolute paths, so commands
+written relative to a stale working directory counted as undetected.
 
-Para comparação, a 0.1.0 registrou **1** interceptação no mesmo histórico.
+For comparison, version 0.1.0 recorded **1** interception across the same history.
 
-**Delegação real ao modelo local.** Medido com `gemma4:e4b` num Apple Silicon:
+**Real delegation to the local model.** Measured with `gemma4:e4b` on Apple Silicon:
 
-| Entrada | Tokens ao Ollama | Tokens ao Claude | Tempo |
+| Input | Tokens to Ollama | Tokens to Claude | Time |
 |---|---|---|---|
-| 1 arquivo de 276 linhas | 3.318 | 2.252 | 53 s |
-| 1 arquivo de 575 linhas (2 partes) | 13.383 | 378 | 68 s |
+| One 276-line file | 3,318 | 2,252 | 53 s |
+| One 575-line file, 2 chunks | 13,383 | 378 | 68 s |
 
-A segunda linha é o caso típico: o arquivo custou 13 mil tokens ao modelo local e 378 ao
-Claude. A primeira mostra o risco de perguntas amplas, que fazem o modelo local enumerar tudo
-e devolver quase o volume original. **Perguntas específicas comprimem, perguntas vagas não.**
+The second row is the typical case: the file cost 13 thousand tokens on the local model and 378
+on Claude. The first shows the risk of broad questions, which make the local model enumerate
+everything and hand back nearly the original volume. **Specific questions compress, vague ones
+do not.**
 
-Latência é o custo real: dezenas de segundos por delegação. Modelos menores respondem mais
-rápido com perda de precisão nos números de linha.
+Latency is the real cost: tens of seconds per delegation. Smaller models answer faster and lose
+precision on line numbers.
 
-**Suíte de testes.** 27 casos, montados a partir dos comandos exatos que a 0.1.0 deixou passar.
+**Test suite.** 27 cases, built from the exact commands that 0.1.0 let through.
 
-## Como funciona
+## How it works
 
-Três hooks, um script de delegação e um de métricas.
+Three hooks, one delegation script, one metrics script.
 
-| Peça | Papel |
+| Piece | Role |
 |---|---|
-| `hooks/check-file-size` | `PreToolUse` em `Read`. Calcula linhas efetivas: `min(limit, total - offset)`. |
-| `hooks/check-bash-read` | `PreToolUse` em `Bash` e em ferramentas MCP que executam shell. Analisa `cat`, `head`, `tail`, `sed -n`, `awk`, `nl`, `bat`, `rtk read`. |
-| `hooks/session-start` | `SessionStart`. Injeta a regra de roteamento e registra se o Ollama está de pé. |
-| `scripts/bulk-read` | Monta a mensagem, chama o Ollama, imprime a resposta. |
-| `scripts/shunt-stats` | Resume o log: decisões, arquivos mais bloqueados, tokens delegados. |
+| `hooks/check-file-size` | `PreToolUse` on `Read`. Computes effective lines: `min(limit, total - offset)`. |
+| `hooks/check-bash-read` | `PreToolUse` on `Bash` and on MCP tools that execute shell. Parses `cat`, `head`, `tail`, `sed -n`, `awk`, `nl`, `bat`, `rtk read`. |
+| `hooks/session-start` | `SessionStart`. Injects the routing rule and records whether Ollama is up. |
+| `scripts/bulk-read` | Builds the message, calls Ollama, prints the answer. |
+| `scripts/shunt-stats` | Summarizes the log: decisions, most-blocked files, delegated tokens. |
 
-O `session-start` é o que faz o plugin ser usado em vez de descoberto por acidente. Sem ele,
-o modelo só aprende que o shunt existe quando um bloqueio acontece, e a reação natural a um
-bloqueio é tentar contornar.
+`session-start` is what makes the plugin get used rather than discovered by accident. Without
+it, the model only learns the shunt exists when a block happens, and the natural reaction to a
+block is to try to route around it.
 
-### Regras de decisão
+### Decision rules
 
-Em `hooks/lib/shunt_common.py`:
+In `hooks/lib/shunt_common.py`:
 
-1. Leitura de até `SHUNT_EDIT_WINDOW` (80) linhas passa sempre e **não conta**. É a janela que
-   o Claude precisa para editar depois de consultar o modelo local. Sem essa exceção, o fluxo
-   de edição quebra.
-2. Leitura acima de `SHUNT_MIN_LINES` (350) é negada, com o comando `bulk-read` pronto para
-   colar na mensagem de erro.
-3. **Anti-fatiamento.** As faixas lidas de cada arquivo são guardadas por sessão como união de
-   intervalos. Quando o acumulado passa do limiar, a próxima fatia é negada. Reler a mesma
-   faixa não faz o total crescer.
-4. Vários arquivos num único comando acima de `SHUNT_MAX_TOTAL_LINES` (3× o limiar) também são
-   negados.
-5. Se o Ollama não responde, **nenhum bloqueio acontece**. A sondagem é cacheada por 2 minutos.
-   Bloquear sem ter para onde delegar só travaria o Claude.
+1. A read of up to `SHUNT_EDIT_WINDOW` (80) lines always passes and **is not counted**. That is
+   the window Claude needs to edit after consulting the local model. Without this exception the
+   editing flow breaks.
+2. A read above `SHUNT_MIN_LINES` (350) is denied, and the denial message carries a
+   ready-to-paste `bulk-read` command.
+3. **Anti-slicing.** The ranges read from each file are stored per session as a union of
+   intervals. Once the accumulated coverage passes the threshold, the next slice is denied.
+   Rereading the same range does not grow the total.
+4. Several files in a single command above `SHUNT_MAX_TOTAL_LINES` (3× the threshold) are denied
+   as well.
+5. If Ollama does not answer, **nothing is blocked**. The probe is cached for two minutes.
+   Blocking with nowhere to delegate would only stall Claude.
 
-### O que o parser reconhece
+### What the parser recognizes
 
-Cobre `cd dir && cat arquivo`, `2>/dev/null` e `2>&1`, `&&`/`;`/`||`/nova linha, pipes
-(`cat f | head -40` conta 40 linhas; `cat f | grep x` é busca e passa), globs, `head -n150` em
-todas as variantes de flag, `tail -n +5`, `sed -n '30,120p'` e listas de faixas,
-`awk 'NR>=10 && NR<=50'`, `sed -i` como edição e não leitura, e o prefixo `rtk read` de
-proxies de CLI que reescrevem `cat` antes deste hook enxergar.
+It covers `cd dir && cat file`, `2>/dev/null` and `2>&1`, `&&`/`;`/`||`/newline separators,
+pipes (`cat f | head -40` counts 40 lines, while `cat f | grep x` is a search and passes),
+globs, `head -n150` in every flag spelling, `tail -n +5`, `sed -n '30,120p'` and range lists,
+`awk 'NR>=10 && NR<=50'`, `sed -i` as an edit rather than a read, and the `rtk read` prefix left
+by CLI proxies that rewrite `cat` before this hook sees it.
 
-Não cobre: heredocs (`<<EOF`) e caminhos em variáveis de shell (`cat "$f"`). Os dois viram
-`skip` no log, com o motivo, em vez de passarem silenciosamente.
+It does not cover heredocs (`<<EOF`) or paths held in shell variables (`cat "$f"`). Both are
+logged as `skip` with the reason, instead of passing silently.
 
-## Dependências
+## Dependencies
 
-| Requisito | Para quê | Observação |
+| Requirement | What for | Note |
 |---|---|---|
-| [Ollama](https://ollama.com) rodando | o modelo leitor | `ollama serve` |
-| Um modelo puxado | idem | `ollama pull gemma4:e4b`, ou outro via `SHUNT_MODEL` |
-| `python3` ≥ 3.9 | os três hooks | **só biblioteca padrão**, nada de `pip install` |
-| `bash` | `bulk-read` | 3.2+, o do macOS serve |
-| `curl` e `jq` | falar com a API do Ollama | `brew install jq` |
-| Claude Code | o host | versão que aceita `hookSpecificOutput` |
+| [Ollama](https://ollama.com) running | the reader model | `ollama serve` |
+| A pulled model | same | `ollama pull gemma4:e4b`, or another via `SHUNT_MODEL` |
+| `python3` ≥ 3.9 | the three hooks | **standard library only**, no `pip install` |
+| `bash` | `bulk-read` | 3.2+, the one shipped with macOS works |
+| `curl` and `jq` | talking to Ollama's API | `brew install jq` |
+| Claude Code | the host | a version that accepts `hookSpecificOutput` |
 
-Sem dependências Python externas por escolha: um hook que falha porque um pacote não está no
-ambiente é um hook que não protege nada.
+No external Python dependencies, by choice: a hook that fails because a package is missing from
+the environment is a hook that protects nothing.
 
-## Instalação
+## Installation
 
 ```bash
 claude plugin marketplace add tarcisiojr/shunt-ollama
 claude plugin install shunt-ollama@shunt-ollama
 ```
 
-Reinicie o Claude Code. Antes de testar, garanta o modelo local:
+Restart Claude Code. Before testing, make sure the local model is ready:
 
 ```bash
-ollama serve &            # se ainda não estiver rodando
+ollama serve &            # if it is not running yet
 ollama pull gemma4:e4b
 ```
 
-Peça ao Claude para ler um arquivo de mais de 350 linhas. Ele deve responder que a leitura foi
-bloqueada e chamar o `bulk-read`.
+Ask Claude to read a file longer than 350 lines. It should report that the read was denied and
+call `bulk-read` instead.
 
-### Sem marketplace
+### Without a marketplace
 
-Copie `hooks/hooks.json` para a seção `hooks` do seu `settings.json`, trocando
-`${CLAUDE_PLUGIN_ROOT}` pelo caminho absoluto do clone, e ponha
-`skills/bulk-reader/SKILL.md` em `.claude/skills/bulk-reader/SKILL.md`.
+Copy `hooks/hooks.json` into the `hooks` section of your `settings.json`, replacing
+`${CLAUDE_PLUGIN_ROOT}` with the absolute path of your clone, and place
+`skills/bulk-reader/SKILL.md` at `.claude/skills/bulk-reader/SKILL.md`.
 
-### Ajustando o limiar
+### Tuning the threshold
 
-O padrão de 350 linhas é o do plugin original. Para uso agressivo, algo entre 100 e 150 pega
-muito mais leitura. No `~/.claude/settings.json`:
+The 350-line default comes from the original plugin. For aggressive use, something between 100
+and 150 catches far more reads. In `~/.claude/settings.json`:
 
 ```json
 {
@@ -198,75 +201,76 @@ muito mais leitura. No `~/.claude/settings.json`:
 }
 ```
 
-## Uso do bulk-read
+## Using bulk-read
 
 ```bash
-scripts/bulk-read --question "Quais métodos públicos existem e o que cada um faz?" --paths src/Grande.java
-scripts/bulk-read --question "Como o token é renovado?" --paths launcher.sh lib/
-scripts/bulk-read --question "Onde ficam os handlers?" --glob 'src/**/*.rs'
-scripts/bulk-read --question "O que mudou e onde?" --cmd "git diff main"
-git diff | scripts/bulk-read --question "Resuma por arquivo" --stdin
+scripts/bulk-read --question "Which public methods exist and what does each one do?" --paths src/Big.java
+scripts/bulk-read --question "How is the token renewed?" --paths launcher.sh lib/
+scripts/bulk-read --question "Where are the handlers?" --glob 'src/**/*.rs'
+scripts/bulk-read --question "What changed and where?" --cmd "git diff main"
+git diff | scripts/bulk-read --question "Summarize per file" --stdin
 ```
 
-Diretórios em `--paths` são expandidos, ignorando `.git` e `node_modules`. Sem `--question`, a
-pergunta padrão pede símbolos públicos, responsabilidades, dependências e pontos de entrada.
+Directories in `--paths` are expanded, skipping `.git` and `node_modules`. With no `--question`,
+the default asks for public symbols, responsibilities, dependencies, and entry points.
 
-A resposta sai no stdout como `- Nome (path:Lini-Lfim): descrição`. No stderr aparece
-`[shunt: N tokens entrada | M saída | Xs | modelo]`. Arquivos maiores que `SHUNT_NUM_CTX` são
-fatiados automaticamente, preservando a numeração original, e o script avisa quando o prompt
-chega perto de truncar.
+The answer goes to stdout as `- Name (path:Lstart-Lend): description`. stderr carries
+`[shunt: N input tokens | M output | Xs | model]`. Files larger than `SHUNT_NUM_CTX` are chunked
+automatically, preserving original line numbers, and the script warns when the prompt gets close
+to truncation.
 
-Fluxo em duas fases, e a segunda é obrigatória antes de editar: **pergunte** ao modelo local,
-depois **leia cirurgicamente** com `offset`/`limit` no trecho apontado. O modelo local pode
-errar alguns números de linha, então confira valores exatos antes de um `Edit`.
+Two phases, and the second is mandatory before editing: **ask** the local model, then **read
+surgically** with `offset`/`limit` on the slice it pointed at. The local model can be off by a
+few lines, so verify exact values before an `Edit`.
 
-## Variáveis de ambiente
+## Environment variables
 
-| Variável | Default | Função |
+| Variable | Default | Purpose |
 |---|---|---|
-| `SHUNT_MODEL` | `gemma4:e4b` | modelo do Ollama |
-| `SHUNT_TEMPERATURE` | `0.2` | mesma do original |
-| `SHUNT_NUM_CTX` | `32768` | janela de contexto; o Ollama sobe com 4096 se você não setar, e aí trunca em silêncio |
-| `SHUNT_KEEP_ALIVE` | `30m` | mantém o modelo carregado entre chamadas |
-| `SHUNT_MIN_LINES` | `350` | limiar de bloqueio |
-| `SHUNT_EDIT_WINDOW` | `80` | leituras até este tamanho passam sempre e não contam |
-| `SHUNT_MAX_TOTAL_LINES` | `3 × MIN_LINES` | soma de vários arquivos num só comando |
-| `SHUNT_TIMEOUT_SECONDS` | `180` | timeout do `curl` |
-| `SHUNT_HOOK_LOG` | `~/.claude/shunt.log` | log TSV de decisões |
-| `SHUNT_ASSUME_OLLAMA` | vazio | `1` pula a sondagem e bloqueia sempre (testes/CI) |
+| `SHUNT_MODEL` | `gemma4:e4b` | Ollama model |
+| `SHUNT_TEMPERATURE` | `0.2` | same as the original |
+| `SHUNT_NUM_CTX` | `32768` | context window; Ollama starts at 4096 if unset, and then truncates silently |
+| `SHUNT_KEEP_ALIVE` | `30m` | keeps the model loaded between calls |
+| `SHUNT_MIN_LINES` | `350` | blocking threshold |
+| `SHUNT_EDIT_WINDOW` | `80` | reads up to this size always pass and are not counted |
+| `SHUNT_MAX_TOTAL_LINES` | `3 × MIN_LINES` | sum across several files in one command |
+| `SHUNT_TIMEOUT_SECONDS` | `180` | `curl` timeout |
+| `SHUNT_HOOK_LOG` | `~/.claude/shunt.log` | TSV decision log |
+| `SHUNT_ASSUME_OLLAMA` | empty | `1` skips the probe and always blocks (tests/CI) |
 | `OLLAMA_HOST` | `http://localhost:11434` | endpoint |
 
-## Métricas e depuração
+## Metrics and debugging
 
 ```bash
 scripts/shunt-stats
 scripts/shunt-stats --since 2026-09-01
 ```
 
-Mostra decisões por ferramenta, arquivos mais bloqueados, tokens delegados ao Ollama contra
-tokens devolvidos ao Claude, e a taxa de conversão de bloqueio em delegação.
+Shows decisions per tool, most-blocked files, tokens delegated to Ollama against tokens returned
+to Claude, and how often a block converted into a delegation.
 
-O log é TSV com oito colunas:
+The log is TSV with eight columns:
 
-| # | Coluna | Conteúdo |
+| # | Column | Content |
 |---|---|---|
-| 1 | timestamp | ISO 8601, hora local |
-| 2 | sessão | id da sessão do Claude Code, ou `-` fora de sessão |
-| 3 | ferramenta | `Read`, `Bash`, nome da ferramenta MCP, `bulk-read`, `SessionStart` |
-| 4 | decisão | `allow`, `deny`, `skip`, `ok`, `error`, `info` |
-| 5 | motivo | ver abaixo |
-| 6 | arquivo | caminho absoluto, ou `-` |
-| 7 | total | linhas do arquivo |
-| 8 | efetivo | linhas que entrariam no contexto |
+| 1 | timestamp | ISO 8601, local time |
+| 2 | session | Claude Code session id, or `-` outside a session |
+| 3 | tool | `Read`, `Bash`, the MCP tool name, `bulk-read`, `SessionStart` |
+| 4 | decision | `allow`, `deny`, `skip`, `ok`, `error`, `info` |
+| 5 | reason | see below |
+| 6 | file | absolute path, or `-` |
+| 7 | total | lines in the file |
+| 8 | effective | lines that would enter the context |
 
-Motivos: `edit-window` (≤ 80 linhas, liberada), `counted` (liberada e somada),
-`single-read` (negada por tamanho), `cumulative` (negada pelo acumulado de fatias),
-`multi-file` (negada pela soma), `ollama-off` (liberada por falta do modelo),
-`heredoc` e `unresolved:$VAR` (não analisável).
+Reasons: `edit-window` (≤ 80 lines, allowed), `counted` (allowed and added to the total),
+`single-read` (denied on size), `cumulative` (denied on accumulated slices), `multi-file`
+(denied on the sum), `ollama-off` (allowed because no model is available), plus `heredoc` and
+`unresolved:$VAR` (not analyzable).
 
-O estado por sessão fica em `$TMPDIR/shunt-state-<session_id>.json`. Apagar reseta o acumulado.
+Per-session state lives in `$TMPDIR/shunt-state-<session_id>.json`. Deleting it resets the
+running totals.
 
-## Testes
+## Tests
 
 ```bash
 python3 -m unittest discover -s tests
@@ -274,29 +278,31 @@ flake8 --max-line-length=100 hooks/lib tests scripts/shunt-stats
 shellcheck scripts/bulk-read scripts/lib/ollama.sh
 ```
 
-Os casos vieram de comandos reais de sessões em que a 0.1.0 não interceptou nada. Ao adicionar
-suporte a um comando novo, escreva primeiro o caso que hoje escapa.
+The cases come from real commands in sessions where 0.1.0 intercepted nothing. When adding
+support for a new command, write the escaping case first.
 
-## Limitações conhecidas
+Code comments and inline documentation are in Brazilian Portuguese.
 
-- **Latência.** Dezenas de segundos por delegação. É o preço de não gastar contexto.
-- **Precisão dos números de linha.** Um modelo de 4B erra por algumas linhas. Daí a regra de
-  reler o trecho antes de editar.
-- **Heredocs e variáveis de shell** não são analisados.
-- **Pergunta vaga comprime pouco.** O modelo local enumera tudo e devolve quase o volume
-  original.
-- **Só leitura.** O mode `code-writer` do original não foi portado. O script seria análogo:
-  mensagem no formato `Spec: ...\n\nReference:\n<arquivo>` e um system prompt terminando em
+## Known limitations
+
+- **Latency.** Tens of seconds per delegation. That is the price of not spending context.
+- **Line-number precision.** A 4B model is off by a few lines. Hence the rule to reread the
+  slice before editing.
+- **Heredocs and shell variables** are not analyzed.
+- **A vague question compresses poorly.** The local model enumerates everything and hands back
+  nearly the original volume.
+- **Read-only.** The original's `code-writer` mode was not ported. The script would be
+  analogous: a message shaped as `Spec: ...\n\nReference:\n<file>` and a system prompt ending in
   "Output only the code. No markdown fences, no explanation."
 
 ## Changelog
 
-- **0.2.0** — hooks em Python, linhas efetivas, anti-fatiamento por sessão, cobertura de
-  ferramentas MCP que executam shell, hook de `SessionStart`, `--cmd`/`--stdin`/`--glob`,
-  fatiamento automático, `keep_alive`, log TSV e `shunt-stats`.
-- **0.1.0** — port inicial: hooks do original com o transporte trocado para o Ollama.
+- **0.2.0** — Python hooks, effective lines, per-session anti-slicing, coverage of MCP tools
+  that execute shell, a `SessionStart` hook, `--cmd`/`--stdin`/`--glob`, automatic chunking,
+  `keep_alive`, TSV logging, and `shunt-stats`.
+- **0.1.0** — initial port: the original hooks with the transport swapped for Ollama.
 
-## Licença
+## License
 
-Apache 2.0, a mesma do repositório original da Spotify. Veja [LICENSE](LICENSE) e
+Apache 2.0, the same as Spotify's original repository. See [LICENSE](LICENSE) and
 [NOTICE](NOTICE).
