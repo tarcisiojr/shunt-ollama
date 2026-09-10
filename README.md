@@ -103,7 +103,20 @@ do not.**
 Latency is the real cost: tens of seconds per delegation. Smaller models answer faster and lose
 precision on line numbers.
 
-**Test suite.** 27 cases, built from the exact commands that 0.1.0 let through.
+**What 0.3.0 fixed.** Two days of real logs showed the plugin was working as a brake and never
+as a detour. Of 50 denials, 48 led to better behavior, but Claude never once delegated. Worse,
+the always-free editing window was a hole: 13,603 of the 17,281 lines that reached the context
+came through it, 80 lines at a time. Counting the window from the second read onward closes it:
+
+| File | Before | After |
+|---|---|---|
+| A 4,141-line shell script | 2,318 lines entered, 56% of the file | 337 lines, 8% |
+| A 3,173-line shell script | 2,046 lines entered, 64% of the file | 341 lines, 11% |
+
+Across the whole log the block rate went from 27% to 32%, and blocked tokens from roughly 78
+thousand to 91 thousand.
+
+**Test suite.** 39 cases, built from the exact commands that earlier versions let through.
 
 ## How it works
 
@@ -125,18 +138,26 @@ block is to try to route around it.
 
 In `hooks/lib/shunt_common.py`:
 
-1. A read of up to `SHUNT_EDIT_WINDOW` (80) lines always passes and **is not counted**. That is
-   the window Claude needs to edit after consulting the local model. Without this exception the
-   editing flow breaks.
-2. A read above `SHUNT_MIN_LINES` (350) is denied, and the denial message carries a
-   ready-to-paste `bulk-read` command.
-3. **Anti-slicing.** The ranges read from each file are stored per session as a union of
+1. A read of up to `SHUNT_ALWAYS_FREE` (25) lines always passes and is never counted. This is
+   the escape valve that keeps surgical editing possible even after a file's running total has
+   been exhausted.
+2. The first `SHUNT_EDIT_FREE` (1) read of up to `SHUNT_EDIT_WINDOW` (80) lines per file also
+   passes free and uncounted. From the second one on, those reads join the running total.
+   Slicing a file into 80-line chunks used to bypass the plugin entirely.
+3. A read above `SHUNT_MIN_LINES` (250) is denied. The denial compares both costs, reading
+   directly versus delegating, and carries a ready-to-paste `bulk-read` command.
+4. **Anti-slicing.** The ranges read from each file are stored per session as a union of
    intervals. Once the accumulated coverage passes the threshold, the next slice is denied.
    Rereading the same range does not grow the total.
-4. Several files in a single command above `SHUNT_MAX_TOTAL_LINES` (3× the threshold) are denied
+5. Several files in a single command above `SHUNT_MAX_TOTAL_LINES` (3× the threshold) are denied
    as well.
-5. If Ollama does not answer, **nothing is blocked**. The probe is cached for two minutes.
+6. If Ollama does not answer, **nothing is blocked**. The probe is cached for two minutes.
    Blocking with nowhere to delegate would only stall Claude.
+
+The threshold is floored at twice the edit window. A threshold sitting right above the window
+leaves a sliver of countable reads and produces denials worth almost no savings. Setting
+`SHUNT_MIN_LINES=100` with the default window yields an effective 160, logged as
+`threshold-floor` at session start.
 
 ### What the parser recognizes
 
@@ -188,18 +209,24 @@ Copy `hooks/hooks.json` into the `hooks` section of your `settings.json`, replac
 
 ### Tuning the threshold
 
-The 350-line default comes from the original plugin. For aggressive use, something between 100
-and 150 catches far more reads. In `~/.claude/settings.json`:
+The default is 250 lines. Because of the floor at twice the edit window, values below 160 have
+no effect unless you shrink `SHUNT_EDIT_WINDOW` too. For aggressive use, lower both. In
+`~/.claude/settings.json`:
 
 ```json
 {
   "env": {
-    "SHUNT_MIN_LINES": "150",
+    "SHUNT_MIN_LINES": "160",
+    "SHUNT_EDIT_WINDOW": "60",
     "SHUNT_MODEL": "gemma4:e4b",
     "SHUNT_NUM_CTX": "32768"
   }
 }
 ```
+
+A tighter threshold blocks more, and every block costs either a delegation of tens of seconds
+or a piece of information Claude will do without. Measured on real logs, dropping from 250 to
+160 raised the block rate from 32% to 41% and the denial count from 78 to 97.
 
 ## Using bulk-read
 
@@ -231,8 +258,10 @@ few lines, so verify exact values before an `Edit`.
 | `SHUNT_TEMPERATURE` | `0.2` | same as the original |
 | `SHUNT_NUM_CTX` | `32768` | context window; Ollama starts at 4096 if unset, and then truncates silently |
 | `SHUNT_KEEP_ALIVE` | `30m` | keeps the model loaded between calls |
-| `SHUNT_MIN_LINES` | `350` | blocking threshold |
-| `SHUNT_EDIT_WINDOW` | `80` | reads up to this size always pass and are not counted |
+| `SHUNT_MIN_LINES` | `250` | blocking threshold, floored at `2 × EDIT_WINDOW` |
+| `SHUNT_EDIT_WINDOW` | `80` | what counts as an editing read |
+| `SHUNT_EDIT_FREE` | `1` | how many editing reads per file pass without being counted |
+| `SHUNT_ALWAYS_FREE` | `25` | reads up to this size are never counted and never denied |
 | `SHUNT_MAX_TOTAL_LINES` | `3 × MIN_LINES` | sum across several files in one command |
 | `SHUNT_TIMEOUT_SECONDS` | `180` | `curl` timeout |
 | `SHUNT_HOOK_LOG` | `~/.claude/shunt.log` | TSV decision log |
@@ -262,9 +291,11 @@ The log is TSV with eight columns:
 | 7 | total | lines in the file |
 | 8 | effective | lines that would enter the context |
 
-Reasons: `edit-window` (≤ 80 lines, allowed), `counted` (allowed and added to the total),
-`single-read` (denied on size), `cumulative` (denied on accumulated slices), `multi-file`
-(denied on the sum), `ollama-off` (allowed because no model is available), plus `heredoc` and
+Reasons: `always-free` (≤ 25 lines, never counted), `edit-window` (first editing read of a file,
+free), `window-counted` (a later editing read, added to the total), `counted` (a mid-size read,
+added to the total), `single-read` (denied on size), `cumulative` (denied on accumulated
+slices), `multi-file` (denied on the sum), `ollama-off` (allowed because no model is available),
+`threshold-floor` (the configured threshold was raised to the floor), plus `heredoc` and
 `unresolved:$VAR` (not analyzable).
 
 Per-session state lives in `$TMPDIR/shunt-state-<session_id>.json`. Deleting it resets the
@@ -297,6 +328,10 @@ Code comments and inline documentation are in Brazilian Portuguese.
 
 ## Changelog
 
+- **0.3.0** — the editing window now counts from the second read of a file onward, closing the
+  80-line slicing bypass; an always-free tier of 25 lines keeps surgical edits possible;
+  denials compare the cost of reading against the cost of delegating; the threshold is floored
+  at twice the window, and its default drops from 350 to 250.
 - **0.2.0** — Python hooks, effective lines, per-session anti-slicing, coverage of MCP tools
   that execute shell, a `SessionStart` hook, `--cmd`/`--stdin`/`--glob`, automatic chunking,
   `keep_alive`, TSV logging, and `shunt-stats`.

@@ -102,7 +102,22 @@ e devolver quase o volume original. **Perguntas específicas comprimem, pergunta
 Latência é o custo real: dezenas de segundos por delegação. Modelos menores respondem mais
 rápido com perda de precisão nos números de linha.
 
-**Suíte de testes.** 27 casos, montados a partir dos comandos exatos que a 0.1.0 deixou passar.
+**O que a 0.3.0 corrigiu.** Dois dias de log real mostraram o plugin funcionando como freio e
+nunca como desvio. Das 50 negativas, 48 levaram a comportamento melhor, mas o Claude não
+delegou uma única vez. Pior, a janela de edição sempre livre era um furo: 13.603 das 17.281
+linhas que chegaram ao contexto passaram por ela, 80 de cada vez. Contar a janela a partir da
+segunda leitura fecha isso:
+
+| Arquivo | Antes | Depois |
+|---|---|---|
+| Script shell de 4.141 linhas | 2.318 linhas entraram, 56% do arquivo | 337 linhas, 8% |
+| Script shell de 3.173 linhas | 2.046 linhas entraram, 64% do arquivo | 341 linhas, 11% |
+
+No log inteiro a taxa de bloqueio subiu de 27% para 32%, e os tokens bloqueados de cerca de 78
+mil para 91 mil.
+
+**Suíte de testes.** 39 casos, montados a partir dos comandos exatos que versões anteriores
+deixaram passar.
 
 ## Como funciona
 
@@ -124,18 +139,26 @@ bloqueio é tentar contornar.
 
 Em `hooks/lib/shunt_common.py`:
 
-1. Leitura de até `SHUNT_EDIT_WINDOW` (80) linhas passa sempre e **não conta**. É a janela que
-   o Claude precisa para editar depois de consultar o modelo local. Sem essa exceção, o fluxo
-   de edição quebra.
-2. Leitura acima de `SHUNT_MIN_LINES` (350) é negada, com o comando `bulk-read` pronto para
-   colar na mensagem de erro.
-3. **Anti-fatiamento.** As faixas lidas de cada arquivo são guardadas por sessão como união de
+1. Leitura de até `SHUNT_ALWAYS_FREE` (25) linhas passa sempre e nunca é contada. É a válvula
+   de escape que mantém a edição cirúrgica possível mesmo depois de o acumulado do arquivo ter
+   estourado.
+2. A primeira leitura de até `SHUNT_EDIT_WINDOW` (80) linhas de cada arquivo também passa livre
+   e sem contar, tantas quantas `SHUNT_EDIT_FREE` (1) permitir. Da segunda em diante ela entra
+   no acumulado. Fatiar o arquivo em pedaços de 80 linhas contornava o plugin por completo.
+3. Leitura acima de `SHUNT_MIN_LINES` (250) é negada. A negativa compara os dois custos, ler
+   direto contra delegar, e traz o comando `bulk-read` pronto para colar.
+4. **Anti-fatiamento.** As faixas lidas de cada arquivo são guardadas por sessão como união de
    intervalos. Quando o acumulado passa do limiar, a próxima fatia é negada. Reler a mesma
    faixa não faz o total crescer.
-4. Vários arquivos num único comando acima de `SHUNT_MAX_TOTAL_LINES` (3× o limiar) também são
+5. Vários arquivos num único comando acima de `SHUNT_MAX_TOTAL_LINES` (3× o limiar) também são
    negados.
-5. Se o Ollama não responde, **nenhum bloqueio acontece**. A sondagem é cacheada por 2 minutos.
+6. Se o Ollama não responde, **nenhum bloqueio acontece**. A sondagem é cacheada por 2 minutos.
    Bloquear sem ter para onde delegar só travaria o Claude.
+
+O limiar tem piso de duas vezes a janela de edição. Um limiar rente à janela deixa uma faixa
+estreita de leituras contáveis e produz negativas de economia quase nula. Configurar
+`SHUNT_MIN_LINES=100` com a janela padrão resulta em 160 efetivos, registrado como
+`threshold-floor` no início da sessão.
 
 ### O que o parser reconhece
 
@@ -187,18 +210,24 @@ Copie `hooks/hooks.json` para a seção `hooks` do seu `settings.json`, trocando
 
 ### Ajustando o limiar
 
-O padrão de 350 linhas é o do plugin original. Para uso agressivo, algo entre 100 e 150 pega
-muito mais leitura. No `~/.claude/settings.json`:
+O padrão é 250 linhas. Por causa do piso de duas vezes a janela de edição, valores abaixo de
+160 não têm efeito a menos que você reduza `SHUNT_EDIT_WINDOW` também. Para uso agressivo,
+baixe os dois. No `~/.claude/settings.json`:
 
 ```json
 {
   "env": {
-    "SHUNT_MIN_LINES": "150",
+    "SHUNT_MIN_LINES": "160",
+    "SHUNT_EDIT_WINDOW": "60",
     "SHUNT_MODEL": "gemma4:e4b",
     "SHUNT_NUM_CTX": "32768"
   }
 }
 ```
+
+Limiar mais apertado bloqueia mais, e cada bloqueio custa uma delegação de dezenas de segundos
+ou uma informação que o Claude vai dispensar. Medido em logs reais, cair de 250 para 160 subiu
+a taxa de bloqueio de 32% para 41% e as negativas de 78 para 97.
 
 ## Uso do bulk-read
 
@@ -230,8 +259,10 @@ errar alguns números de linha, então confira valores exatos antes de um `Edit`
 | `SHUNT_TEMPERATURE` | `0.2` | mesma do original |
 | `SHUNT_NUM_CTX` | `32768` | janela de contexto; o Ollama sobe com 4096 se você não setar, e aí trunca em silêncio |
 | `SHUNT_KEEP_ALIVE` | `30m` | mantém o modelo carregado entre chamadas |
-| `SHUNT_MIN_LINES` | `350` | limiar de bloqueio |
-| `SHUNT_EDIT_WINDOW` | `80` | leituras até este tamanho passam sempre e não contam |
+| `SHUNT_MIN_LINES` | `250` | limiar de bloqueio, com piso de `2 × EDIT_WINDOW` |
+| `SHUNT_EDIT_WINDOW` | `80` | o que conta como leitura de edição |
+| `SHUNT_EDIT_FREE` | `1` | quantas leituras de edição por arquivo passam sem contar |
+| `SHUNT_ALWAYS_FREE` | `25` | leituras até este tamanho nunca contam e nunca são negadas |
 | `SHUNT_MAX_TOTAL_LINES` | `3 × MIN_LINES` | soma de vários arquivos num só comando |
 | `SHUNT_TIMEOUT_SECONDS` | `180` | timeout do `curl` |
 | `SHUNT_HOOK_LOG` | `~/.claude/shunt.log` | log TSV de decisões |
@@ -261,10 +292,12 @@ O log é TSV com oito colunas:
 | 7 | total | linhas do arquivo |
 | 8 | efetivo | linhas que entrariam no contexto |
 
-Motivos: `edit-window` (≤ 80 linhas, liberada), `counted` (liberada e somada),
-`single-read` (negada por tamanho), `cumulative` (negada pelo acumulado de fatias),
-`multi-file` (negada pela soma), `ollama-off` (liberada por falta do modelo),
-`heredoc` e `unresolved:$VAR` (não analisável).
+Motivos: `always-free` (≤ 25 linhas, nunca contada), `edit-window` (primeira leitura de edição
+do arquivo, livre), `window-counted` (leitura de edição posterior, somada), `counted` (leitura
+média, somada), `single-read` (negada por tamanho), `cumulative` (negada pelo acumulado de
+fatias), `multi-file` (negada pela soma), `ollama-off` (liberada por falta do modelo),
+`threshold-floor` (o limiar configurado foi elevado ao piso), `heredoc` e `unresolved:$VAR`
+(não analisável).
 
 O estado por sessão fica em `$TMPDIR/shunt-state-<session_id>.json`. Apagar reseta o acumulado.
 
@@ -295,6 +328,10 @@ Os comentários e a documentação no código estão em português brasileiro.
 
 ## Changelog
 
+- **0.3.0** — a janela de edição passa a contar da segunda leitura de cada arquivo em diante,
+  fechando o contorno de fatiar em pedaços de 80 linhas; uma faixa sempre livre de 25 linhas
+  mantém a edição cirúrgica possível; as negativas comparam o custo de ler com o de delegar; o
+  limiar ganha piso de duas vezes a janela e seu padrão cai de 350 para 250.
 - **0.2.0** — hooks em Python, linhas efetivas, anti-fatiamento por sessão, cobertura de
   ferramentas MCP que executam shell, hook de `SessionStart`, `--cmd`/`--stdin`/`--glob`,
   fatiamento automático, `keep_alive`, log TSV e `shunt-stats`.

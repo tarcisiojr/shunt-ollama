@@ -1,7 +1,7 @@
 """Utilitários compartilhados pelos hooks do shunt-ollama.
 
 Concentra o que antes estava duplicado nos dois hooks em bash: leitura do
-input do hook, limiares, log de decisões, estado por sessão (linhas já lidas
+input do hook, limiares, log de decisões, estado por sessão (faixas já lidas
 de cada arquivo) e a emissão do JSON de deny no formato atual do Claude Code.
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import shlex
 import sys
@@ -28,14 +29,32 @@ def _env_int(name: str, default: int) -> int:
     return int(raw) if raw.isdigit() else default
 
 
-MIN_LINES = _env_int("SHUNT_MIN_LINES", 350)
-# Leituras até este tamanho passam sempre e não contam no acumulado: é a
-# janela que o Claude precisa para editar um trecho depois do bulk-read.
+# Leitura de edição: o trecho que o Claude abre para editar depois de
+# consultar o modelo local.
 EDIT_WINDOW = _env_int("SHUNT_EDIT_WINDOW", 80)
+# Quantas leituras de janela por arquivo passam sem entrar no acumulado. A
+# partir da seguinte elas contam: fatiar em pedaços de 80 linhas era o
+# contorno que deixava mais da metade de um arquivo entrar no contexto.
+EDIT_FREE = _env_int("SHUNT_EDIT_FREE", 1)
+# Válvula de escape: leitura até este tamanho nunca conta e nunca é negada,
+# para que editar um trecho já conhecido continue possível mesmo com o
+# acumulado estourado.
+ALWAYS_FREE = _env_int("SHUNT_ALWAYS_FREE", 25)
+# Limiar de bloqueio. O piso de 2× a janela evita a faixa estreita que
+# gerava negativas de 83 a 96 linhas com economia mínima.
+_MIN_LINES_RAW = _env_int("SHUNT_MIN_LINES", 250)
+MIN_LINES = max(_MIN_LINES_RAW, EDIT_WINDOW * 2)
+MIN_LINES_ADJUSTED = MIN_LINES != _MIN_LINES_RAW
 # Soma de linhas efetivas de vários arquivos num único comando.
 MAX_TOTAL_LINES = _env_int("SHUNT_MAX_TOTAL_LINES", MIN_LINES * 3)
+
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_CHECK_TTL = 120
+# Estimativas para a mensagem de deny, medidas com gemma4:e4b em Apple
+# Silicon. Servem para comparar custos, não para prometer prazo.
+TOKENS_PER_LINE = 12
+OLLAMA_TOKENS_PER_SEC = 380
+NUM_CTX = _env_int("SHUNT_NUM_CTX", 32768)
 
 LOG_PATH = os.environ.get("SHUNT_HOOK_LOG") or os.path.expanduser(
     "~/.claude/shunt.log"
@@ -114,6 +133,27 @@ def is_regular_file(path: str) -> bool:
     return os.path.isfile(path) and os.access(path, os.R_OK)
 
 
+def estimate_delegation(paths: List[str]) -> Tuple[int, int, int]:
+    """Custo de delegar ao modelo local: (partes, segundos, tokens enviados).
+
+    Replica o orçamento do bulk-read: ~80% da janela menos reserva para
+    resposta, e o `cat -n` que acrescenta cerca de 8 caracteres por linha.
+    """
+    budget_chars = max((NUM_CTX * 80 // 100 - 2000) * 4, 20000)
+    chars = 0
+    for path in paths:
+        try:
+            chars += os.path.getsize(path) + count_lines(path) * 8
+        except OSError:
+            continue
+    if chars <= 0:
+        return (1, 0, 0)
+    tokens = chars // 4
+    parts = max(1, math.ceil(chars / budget_chars))
+    seconds = max(1, round(tokens / OLLAMA_TOKENS_PER_SEC))
+    return (parts, seconds, tokens)
+
+
 # --------------------------------------------------------------------------
 # Estado por sessão: faixas já lidas de cada arquivo
 # --------------------------------------------------------------------------
@@ -128,7 +168,7 @@ class State:
 
     def __init__(self, session: str):
         self.path = state_path(session)
-        self.data: dict = {"files": {}, "ollama": {}}
+        self.data: dict = {"files": {}, "windows": {}, "ollama": {}}
         self._fh = None
 
     def __enter__(self) -> "State":
@@ -140,12 +180,13 @@ class State:
             if raw:
                 self.data = json.loads(raw)
             self.data.setdefault("files", {})
+            self.data.setdefault("windows", {})
             self.data.setdefault("ollama", {})
         except (OSError, ValueError):
             self._fh = None
         return self
 
-    def __exit__(self, *exc) -> None:
+    def __exit__(self, *_exc) -> None:
         if self._fh is None:
             return
         try:
@@ -164,6 +205,12 @@ class State:
     def add_ranges(self, path: str, ranges: Iterable[Range]) -> None:
         merged = merge_ranges(list(self.ranges(path)) + list(ranges))
         self.data["files"][path] = [list(r) for r in merged]
+
+    def windows_used(self, path: str) -> int:
+        return int(self.data["windows"].get(path, 0))
+
+    def mark_window(self, path: str) -> None:
+        self.data["windows"][path] = self.windows_used(path) + 1
 
     def ollama_ok(self) -> bool:
         """Se o Ollama está fora, bloquear leitura só travaria o Claude."""
@@ -240,6 +287,7 @@ def decide(session: str, tool: str, requests: Dict[str, List[Request]]) -> None:
         denials: List[str] = []
         denied_paths: List[str] = []
         pending: Dict[str, List[Range]] = {}
+        windows: List[str] = []
         grand_total = 0
 
         for path, reqs in requests.items():
@@ -248,9 +296,19 @@ def decide(session: str, tool: str, requests: Dict[str, List[Request]]) -> None:
             effective = coverage(ranges)
             if effective == 0:
                 continue
-            if effective <= EDIT_WINDOW:
+
+            # Trecho mínimo: sempre livre, para não travar edição pontual.
+            if effective <= ALWAYS_FREE:
+                log(session, tool, "allow", "always-free", path, total, effective)
+                continue
+
+            # Janela de edição: as primeiras EDIT_FREE leituras por arquivo
+            # passam sem contar; as seguintes entram no acumulado.
+            if effective <= EDIT_WINDOW and state.windows_used(path) < EDIT_FREE:
+                windows.append(path)
                 log(session, tool, "allow", "edit-window", path, total, effective)
                 continue
+
             grand_total += effective
             if effective > MIN_LINES:
                 denials.append(
@@ -260,6 +318,7 @@ def decide(session: str, tool: str, requests: Dict[str, List[Request]]) -> None:
                 denied_paths.append(path)
                 log(session, tool, "deny", "single-read", path, total, effective)
                 continue
+
             already = coverage(state.ranges(path))
             after = coverage(state.ranges(path) + ranges)
             if after > MIN_LINES:
@@ -271,6 +330,7 @@ def decide(session: str, tool: str, requests: Dict[str, List[Request]]) -> None:
                 denied_paths.append(path)
                 log(session, tool, "deny", "cumulative", path, total, effective)
                 continue
+
             pending[path] = ranges
 
         if not denials and grand_total > MAX_TOTAL_LINES:
@@ -286,22 +346,37 @@ def decide(session: str, tool: str, requests: Dict[str, List[Request]]) -> None:
         if denials:
             deny(build_deny_message(denials, denied_paths))
 
+        for path in windows:
+            state.mark_window(path)
         for path, ranges in pending.items():
             state.add_ranges(path, ranges)
-            log(session, tool, "allow", "counted", path, count_lines(path),
+            reason = ("window-counted" if coverage(ranges) <= EDIT_WINDOW
+                      else "counted")
+            log(session, tool, "allow", reason, path, count_lines(path),
                 coverage(ranges))
     allow()
 
 
 def build_deny_message(denials: List[str], paths: List[str]) -> str:
+    """A negativa precisa competir com a saída mais fácil, que é desistir da
+    informação. Por isso mostra o custo dos dois caminhos, não só a regra."""
     uniq = list(dict.fromkeys(paths))
+    blocked_lines = sum(count_lines(p) for p in uniq)
+    read_cost = blocked_lines * TOKENS_PER_LINE
+    parts, seconds, sent = estimate_delegation(uniq)
+    chunk_note = f", em {parts} partes" if parts > 1 else ""
     return (
         "shunt: leitura grande bloqueada. "
         + " ".join(denials)
-        + " Delegue ao modelo local, que lê o arquivo inteiro fora do seu "
-        "contexto e responde com bullets ancorados em path:Lini-Lfim:\n  "
+        + f"\n\nCusto de ler direto: ~{read_cost} tokens do seu contexto, "
+        "que ficam gastos até o fim da conversa."
+        + f"\nCusto de delegar: 0 tokens do seu contexto e ~{seconds}s de "
+        f"espera{chunk_note}. O modelo local processa ~{sent} tokens fora da "
+        "sua janela e devolve bullets ancorados em path:Lini-Lfim:\n  "
         + bulk_read_command(uniq)
-        + f"\nDepois, para editar, faça Read com offset/limit de até "
-        f"{EDIT_WINDOW} linhas só no trecho apontado. Para localizar um "
-        "símbolo, use grep/rg em vez de ler o arquivo."
+        + "\n\nMais barato ainda, quando serve: `grep -n` ou `rg` para "
+        f"localizar um símbolo, ou Read com offset/limit de até {ALWAYS_FREE} "
+        "linhas num trecho que você já conhece (esse tamanho nunca é "
+        "bloqueado). Reler o arquivo em fatias não funciona: elas são somadas "
+        "por sessão."
     )

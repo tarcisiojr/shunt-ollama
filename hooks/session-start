@@ -2,7 +2,8 @@
 """Hook SessionStart: injeta a regra de roteamento de leitura no contexto.
 
 Sem isso o modelo só descobre o shunt quando um deny acontece, e aí tende a
-fatiar o arquivo em vez de delegar. Também registra se o Ollama está de pé.
+fatiar o arquivo em vez de delegar. Também registra se o Ollama está de pé e
+se o limiar configurado precisou ser elevado até o piso.
 """
 
 import json
@@ -20,18 +21,24 @@ def routing_text(ollama_up: bool) -> str:
               "`ollama serve` responder.")
     return (
         "[shunt-ollama] Roteamento de leitura de arquivos.\n"
-        f"- Read/cat/head/tail/sed -n/awk (inclusive dentro de ctx_batch_execute) "
-        f"são BLOQUEADOS acima de {sc.MIN_LINES} linhas efetivas, e também "
-        "quando a soma das fatias já lidas do mesmo arquivo na sessão passa "
-        "desse limiar. Fatiar com offset/limit ou sed -n não contorna.\n"
+        f"- Leituras de até {sc.ALWAYS_FREE} linhas passam sempre. Use esse "
+        "tamanho para abrir um trecho que você já sabe onde está.\n"
+        f"- A primeira leitura de até {sc.EDIT_WINDOW} linhas de cada arquivo "
+        "também passa livre. Da segunda em diante ela entra no acumulado do "
+        "arquivo.\n"
+        f"- Read/cat/head/tail/sed -n/awk (inclusive dentro de ferramentas MCP "
+        f"que executam shell) são BLOQUEADOS acima de {sc.MIN_LINES} linhas "
+        "efetivas, e também quando a soma das faixas já lidas do mesmo arquivo "
+        "passa desse limiar. Fatiar com offset/limit ou sed -n não contorna.\n"
         "- Para entender, resumir ou responder perguntas sobre arquivo grande, "
         "diff grande ou vários arquivos, delegue ao modelo local:\n"
         f"    {sc.BULK_READ} --question \"<pergunta específica>\" --paths <arquivos>\n"
         "  Variantes: --cmd \"git diff main\" | --glob 'src/**/*.rs' | --stdin. "
-        "A resposta vem em bullets `Nome (path:Lini-Lfim)`.\n"
-        f"- Depois, para editar, Read com offset/limit de até {sc.EDIT_WINDOW} "
-        "linhas só no trecho apontado.\n"
-        "- Para LOCALIZAR um símbolo use grep/rg (ou ctx_search), nunca cat.\n"
+        "A resposta vem em bullets `Nome (path:Lini-Lfim)`, custa 0 tokens do "
+        "seu contexto e leva dezenas de segundos.\n"
+        "- Pergunta específica comprime bem; pergunta vaga faz o modelo local "
+        "enumerar tudo e devolver quase o volume original.\n"
+        "- Para LOCALIZAR um símbolo use grep/rg, nunca cat.\n"
         f"- {status}"
     )
 
@@ -42,6 +49,9 @@ def main() -> None:
     with sc.State(session) as state:
         up = state.ollama_ok()
     sc.log(session, "SessionStart", "info", "ollama-up" if up else "ollama-down")
+    if sc.MIN_LINES_ADJUSTED:
+        sc.log(session, "SessionStart", "info",
+               f"threshold-floor:{sc.MIN_LINES}")
     out = {"hookSpecificOutput": {"hookEventName": "SessionStart",
                                   "additionalContext": routing_text(up)}}
     print(json.dumps(out, ensure_ascii=False))
