@@ -104,7 +104,7 @@ pedidas e a cobertura já alcançada, e o `shunt-stats` transforma isso numa com
 versões e num relatório de fatiamento. Os números acima saíram do próprio log, não da leitura
 de transcripts.
 
-**Suíte de testes.** 49 casos, montados a partir dos comandos exatos que versões anteriores
+**Suíte de testes.** 62 casos, montados a partir dos comandos exatos que versões anteriores
 deixaram passar.
 
 ## Como funciona
@@ -175,6 +175,27 @@ Quase nenhuma leitura passava por onde os hooks vigiavam:
 - leituras feitas por outras ferramentas (MCP de terceiros) ficavam fora do matcher
 
 É para isso que existe o parser léxico. Cada um desses cinco formatos é um caso de teste.
+
+### Adaptação à máquina
+
+A velocidade do modelo é propriedade do hardware, não do plugin. O mesmo `gemma4:e4b` passa de
+1.000 tokens por segundo numa GPU dedicada e fica abaixo de 30 numa CPU de notebook. Um número
+fixado aqui estaria errado para quase todo mundo, então nada é fixado: cada chamada registra
+quantos tokens processou e quanto tempo levou, por modelo, em `SHUNT_CALIBRATION`.
+
+As últimas 20 amostras dão duas taxas. O percentil 20 é a pessimista, usada para dimensionar o
+timeout, e a mediana é a típica, usada no tempo que a mensagem de bloqueio mostra. Máquina lenta
+ganha timeout maior sozinha, e trocar `SHUNT_MODEL` começa um histórico separado em vez de
+reaproveitar o antigo.
+
+Dois filtros mantêm o histórico honesto. Chamadas abaixo de 500 tokens são ignoradas, porque
+medem ruído. Amostras que implicam mais de `SHUNT_MAX_PLAUSIBLE_RATE` (3.000 tokens/s) também
+são descartadas: o Ollama reaproveita o prompt em cache quando a chamada repete o mesmo prefixo,
+e o tempo medido desaba. Aprender isso encolheria o timeout justamente antes de um prompt novo e
+lento.
+
+Enquanto não há histórico, a taxa assumida é baixa de propósito, o que compra um timeout
+generoso na primeira chamada. A segunda já é medida.
 
 ### O que o parser reconhece
 
@@ -300,7 +321,11 @@ errar alguns números de linha, então confira valores exatos antes de um `Edit`
 | `SHUNT_ESCAPE_BUDGET` | `80` | linhas extras para leituras de edição após o orçamento acabar |
 | `SHUNT_MAX_TOTAL_LINES` | `3 × MIN_LINES` | soma de vários arquivos num só comando |
 | `SHUNT_WARN_RATIO` | `50` | avisa quando a resposta passa desta fração do conteúdo lido |
-| `SHUNT_TIMEOUT_SECONDS` | `180` | timeout do `curl` |
+| `SHUNT_TIMEOUT_SECONDS` | vazio | timeout fixo em segundos; sobrepõe o calculado |
+| `SHUNT_TIMEOUT_SLACK` | `200` | % do tempo previsto admitido antes de desistir |
+| `SHUNT_TIMEOUT_MIN` / `_MAX` | `60` / `600` | piso e teto do timeout calculado |
+| `SHUNT_CALIBRATION` | `~/.claude/shunt-calibration.json` | velocidade aprendida, por modelo |
+| `SHUNT_FALLBACK_RATE` | `40` | tokens/s assumidos antes da primeira medição |
 | `SHUNT_HOOK_LOG` | `~/.claude/shunt.log` | log TSV de decisões |
 | `SHUNT_ASSUME_OLLAMA` | vazio | `1` pula a sondagem e bloqueia sempre (testes/CI) |
 | `OLLAMA_HOST` | `http://localhost:11434` | endpoint |
@@ -432,6 +457,11 @@ também o idioma do texto de roteamento que os hooks injetam.
 
 ## Changelog
 
+- **0.8.0** — o timeout passa a sair da velocidade medida na própria máquina em vez de uma
+  constante: cada chamada registra tokens e tempo de parede por modelo, o percentil 20
+  dimensiona o timeout e a mediana alimenta a estimativa da negativa. Amostras de prompt em
+  cache são descartadas, e a conversão de nanossegundos saiu do `awk` para o `jq`, onde um
+  locale de vírgula decimal não a corrompe.
 - **0.7.0** — uma skill `shunt-stats` deixa o Claude relatar e interpretar as métricas quando
   perguntado, e o `scripts/release` valida, cria a tag e publica a release da versão do
   manifesto. As versões 0.2.0 a 0.6.0 foram tagueadas retroativamente.

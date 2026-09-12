@@ -490,6 +490,127 @@ class StatsTest(unittest.TestCase):
         self.assertNotIn("renderam pouco", proc.stdout)
 
 
+class CalibrationTest(unittest.TestCase):
+    """A velocidade do modelo é da máquina, não do plugin: numa GPU passa de
+    1000 tok/s, numa CPU fica abaixo de 30. O plugin aprende a sua."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "calib.json")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, samples, model="gemma4:e4b"):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump({"version": 1, "models": {model: {"samples": samples}}}, fh)
+
+    def rate(self, percentile=50, model="gemma4:e4b"):
+        code = ("import sys; sys.path.insert(0, %r); import shunt_common as sc; "
+                "print(sc.learned_rate(%d))"
+                % (os.path.join(ROOT, "hooks", "lib"), percentile))
+        env = {**os.environ, "SHUNT_CALIBRATION": self.path,
+               "SHUNT_MODEL": model}
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return int(out.stdout.strip())
+
+    def test_no_history_uses_fallback(self):
+        """Sem medição, uma taxa baixa dá timeout generoso na primeira chamada."""
+        self.assertEqual(self.rate(), 40)
+
+    def test_learns_from_samples(self):
+        self.write([{"tokens": 1000, "seconds": 10},    # 100 tok/s
+                    {"tokens": 1000, "seconds": 5},     # 200
+                    {"tokens": 1000, "seconds": 2}])    # 500
+        self.assertEqual(self.rate(50), 200)
+
+    def test_conservative_percentile_is_lower(self):
+        self.write([{"tokens": 1000, "seconds": 10},
+                    {"tokens": 1000, "seconds": 5},
+                    {"tokens": 1000, "seconds": 2}])
+        self.assertLess(self.rate(20), self.rate(50))
+
+    def test_other_model_falls_back(self):
+        """Trocar de modelo invalida a medição anterior."""
+        self.write([{"tokens": 1000, "seconds": 1}], model="gemma4:e4b")
+        self.assertEqual(self.rate(50, model="llama3.1:8b"), 40)
+
+    def test_corrupt_file_falls_back(self):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("isso nao e json")
+        self.assertEqual(self.rate(), 40)
+
+    def test_zero_seconds_is_ignored(self):
+        self.write([{"tokens": 1000, "seconds": 0},
+                    {"tokens": 1000, "seconds": 10}])
+        self.assertEqual(self.rate(50), 100)
+
+
+class ShellCalibrationTest(unittest.TestCase):
+    """O lado shell: registro da amostra e timeout derivado."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "calib.json")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def sh(self, body, **env_extra):
+        script = (f'. {os.path.join(ROOT, "scripts", "lib", "ollama.sh")}\n'
+                  + body)
+        env = {**os.environ, "SHUNT_CALIBRATION": self.path}
+        env.pop("SHUNT_TIMEOUT_SECONDS", None)
+        env.update(env_extra)
+        out = subprocess.run(["bash", "-c", script], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout.strip()
+
+    def test_records_sample(self):
+        self.sh('shunt_record_sample 6000 30000000000')   # 200 tok/s
+        with open(self.path, encoding="utf-8") as fh:
+            amostras = json.load(fh)["models"]["gemma4:e4b"]["samples"]
+        self.assertEqual(amostras[0]["tokens"], 6000)
+        self.assertAlmostEqual(amostras[0]["seconds"], 30.0, places=2)
+
+    def test_rejects_cached_prompt_sample(self):
+        """O Ollama reaproveita prompt em cache e o tempo cai para quase zero;
+        aprender isso derrubaria o timeout antes de um prompt novo."""
+        self.sh('shunt_record_sample 6000 100000000')     # 60000 tok/s
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_rejects_tiny_sample(self):
+        self.sh('shunt_record_sample 12 173839000')
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_timeout_grows_when_machine_is_slow(self):
+        rapido = int(self.sh('shunt_record_sample 6000 12000000000;'
+                             ' shunt_timeout_for 24000'))   # 500 tok/s
+        os.remove(self.path)
+        lento = int(self.sh('shunt_record_sample 6000 120000000000;'
+                            ' shunt_timeout_for 24000'))    # 50 tok/s
+        self.assertGreater(lento, rapido)
+
+    def test_timeout_respects_floor_and_ceiling(self):
+        self.assertEqual(int(self.sh('shunt_timeout_for 10')), 60)
+        self.assertEqual(int(self.sh('shunt_timeout_for 99999999')), 600)
+
+    def test_explicit_timeout_wins(self):
+        valor = self.sh('shunt_timeout_for 24000',
+                        SHUNT_TIMEOUT_SECONDS="45")
+        self.assertEqual(int(valor), 45)
+
+    def test_locale_with_decimal_comma_does_not_break(self):
+        """pt_BR faz o awk emitir "37,000", que não é JSON: a divisão ficou no jq."""
+        self.sh('shunt_record_sample 6000 30000000000',
+                LC_ALL="pt_BR.UTF-8", LC_NUMERIC="pt_BR.UTF-8")
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertTrue(json.load(fh)["models"]["gemma4:e4b"]["samples"])
+
+
 class SessionStartTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

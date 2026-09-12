@@ -104,7 +104,7 @@ precision on line numbers.
 for and the coverage reached so far, and `shunt-stats` turns that into a version comparison and
 a slicing report. The numbers above came from the log itself, not from reading transcripts.
 
-**Test suite.** 49 cases, built from the exact commands that earlier versions let through.
+**Test suite.** 62 cases, built from the exact commands that earlier versions let through.
 
 ## How it works
 
@@ -172,6 +172,26 @@ Almost no read passed through where the hooks were watching:
 - reads issued by other tools, such as third-party MCP servers, fell outside the matcher
 
 That is what the lexical parser is for. Each of those five shapes is a test case.
+
+### Adapting to the machine
+
+Model speed is a property of the hardware, not of the plugin. The same `gemma4:e4b` runs above
+1,000 tokens per second on a dedicated GPU and below 30 on a laptop CPU. A number hardcoded here
+would be wrong for almost everyone, so nothing is hardcoded: each call records how many tokens
+it processed and how long it took, per model, in `SHUNT_CALIBRATION`.
+
+The last 20 samples give two figures. The 20th percentile is the pessimistic rate, used to size
+the timeout, and the median is the typical rate, used for the time shown in a denial message. A
+slow machine gets a longer timeout automatically, and switching `SHUNT_MODEL` starts a separate
+history rather than reusing the old one.
+
+Two filters keep the history honest. Calls under 500 tokens are ignored, because they measure
+noise. Samples implying more than `SHUNT_MAX_PLAUSIBLE_RATE` (3,000 tokens/s) are discarded as
+well: Ollama reuses a cached prompt when a call repeats the same prefix, and the measured time
+collapses. Learning that would shrink the timeout right before a fresh, slow prompt.
+
+Until there is history, the assumed rate is deliberately low, which buys a generous timeout on
+the first call. The second call is already measured.
 
 ### What the parser recognizes
 
@@ -297,7 +317,11 @@ few lines, so verify exact values before an `Edit`.
 | `SHUNT_ESCAPE_BUDGET` | `80` | extra lines for editing reads after the budget is spent |
 | `SHUNT_MAX_TOTAL_LINES` | `3 × MIN_LINES` | sum across several files in one command |
 | `SHUNT_WARN_RATIO` | `50` | warns when the answer exceeds this share of the content read |
-| `SHUNT_TIMEOUT_SECONDS` | `180` | `curl` timeout |
+| `SHUNT_TIMEOUT_SECONDS` | unset | fixed timeout in seconds; overrides the calculated one |
+| `SHUNT_TIMEOUT_SLACK` | `200` | % of the predicted time allowed before giving up |
+| `SHUNT_TIMEOUT_MIN` / `_MAX` | `60` / `600` | floor and ceiling of the calculated timeout |
+| `SHUNT_CALIBRATION` | `~/.claude/shunt-calibration.json` | learned speed, per model |
+| `SHUNT_FALLBACK_RATE` | `40` | tokens/s assumed before the first measurement |
 | `SHUNT_HOOK_LOG` | `~/.claude/shunt.log` | TSV decision log |
 | `SHUNT_ASSUME_OLLAMA` | empty | `1` skips the probe and always blocks (tests/CI) |
 | `OLLAMA_HOST` | `http://localhost:11434` | endpoint |
@@ -429,6 +453,11 @@ language of the routing text the hooks inject.
 
 ## Changelog
 
+- **0.8.0** — the timeout is derived from speed measured on the machine itself instead of a
+  constant: each call records tokens and wall time per model, the 20th percentile sizes the
+  timeout and the median feeds the estimate in a denial. Samples from a cached prompt are
+  discarded, and the nanosecond conversion moved from `awk` to `jq`, where a decimal-comma
+  locale cannot corrupt it.
 - **0.7.0** — a `shunt-stats` skill lets Claude report and interpret the metrics on request, and
   `scripts/release` validates, tags and publishes a release for the version in the manifest.
   Versions 0.2.0 through 0.6.0 were tagged retroactively.

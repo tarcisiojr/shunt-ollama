@@ -60,11 +60,30 @@ MAX_TOTAL_LINES = _env_int("SHUNT_MAX_TOTAL_LINES", MIN_LINES * 3)
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_CHECK_TTL = 120
-# Estimativas para a mensagem de deny, medidas com gemma4:e4b em Apple
-# Silicon. Servem para comparar custos, não para prometer prazo.
 TOKENS_PER_LINE = 12
-OLLAMA_TOKENS_PER_SEC = 380
 NUM_CTX = _env_int("SHUNT_NUM_CTX", 32768)
+# Velocidade do modelo depende da máquina, não do plugin, então não há número
+# a cravar aqui: o bulk-read registra tokens e duração de cada chamada e esta
+# é a mesma fonte que o timeout usa. Sem histórico, assume-se uma taxa baixa.
+CALIBRATION_PATH = os.environ.get("SHUNT_CALIBRATION") or os.path.expanduser(
+    "~/.claude/shunt-calibration.json")
+FALLBACK_RATE = _env_int("SHUNT_FALLBACK_RATE", 40)
+MODEL = os.environ.get("SHUNT_MODEL", "gemma4:e4b")
+
+
+def learned_rate(percentile: int = 50) -> int:
+    """Tokens por segundo medidos neste hardware para o modelo em uso."""
+    try:
+        with open(CALIBRATION_PATH, encoding="utf-8") as fh:
+            samples = json.load(fh)["models"][MODEL]["samples"]
+        rates = sorted(s["tokens"] / s["seconds"] for s in samples
+                       if s.get("seconds", 0) > 0)
+    except (OSError, ValueError, KeyError, ZeroDivisionError):
+        return FALLBACK_RATE
+    if not rates:
+        return FALLBACK_RATE
+    return max(1, int(rates[int((len(rates) - 1) * percentile / 100)]))
+
 
 LOG_PATH = os.environ.get("SHUNT_HOOK_LOG") or os.path.expanduser(
     "~/.claude/shunt.log"
@@ -205,7 +224,7 @@ def estimate_delegation(paths: List[str]) -> Tuple[int, int, int]:
         return (1, 0, 0)
     tokens = chars // 4
     parts = max(1, math.ceil(chars / budget_chars))
-    seconds = max(1, round(tokens / OLLAMA_TOKENS_PER_SEC))
+    seconds = max(1, round(tokens / learned_rate(50)))
     return (parts, seconds, tokens)
 
 
