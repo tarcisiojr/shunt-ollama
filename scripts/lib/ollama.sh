@@ -18,6 +18,8 @@ SHUNT_TIMEOUT_SECONDS="${SHUNT_TIMEOUT_SECONDS:-180}"
 # cold start de vários segundos.
 SHUNT_KEEP_ALIVE="${SHUNT_KEEP_ALIVE:-30m}"
 SHUNT_HOOK_LOG="${SHUNT_HOOK_LOG:-$HOME/.claude/shunt.log}"
+# Acima desta razão saída/entrada (%), a delegação rendeu pouco e vale avisar.
+SHUNT_WARN_RATIO="${SHUNT_WARN_RATIO:-50}"
 
 # Versão gravada em cada linha do log, para comparar o efeito de uma mudança.
 # Mesma fonte que os hooks usam: o manifesto do plugin.

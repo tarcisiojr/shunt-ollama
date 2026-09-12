@@ -89,7 +89,7 @@ For comparison, version 0.1.0 recorded **1** interception across the same histor
 
 | Input | Tokens to Ollama | Tokens to Claude | Time |
 |---|---|---|---|
-| One 276-line file | 3,318 | 2,252 | 53 s |
+| One 276-line file, broad question | 3,318 | 2,252 | 53 s |
 | One 575-line file, 2 chunks | 13,383 | 378 | 68 s |
 
 The second row is the typical case: the file cost 13 thousand tokens on the local model and 378
@@ -104,7 +104,7 @@ precision on line numbers.
 for and the coverage reached so far, and `shunt-stats` turns that into a version comparison and
 a slicing report. The numbers above came from the log itself, not from reading transcripts.
 
-**Test suite.** 47 cases, built from the exact commands that earlier versions let through.
+**Test suite.** 49 cases, built from the exact commands that earlier versions let through.
 
 ## How it works
 
@@ -254,10 +254,30 @@ git diff | scripts/bulk-read --question "Summarize per file" --stdin
 Directories in `--paths` are expanded, skipping `.git` and `node_modules`. With no `--question`,
 the default asks for public symbols, responsibilities, dependencies, and entry points.
 
-The answer goes to stdout as `- Name (path:Lstart-Lend): description`. stderr carries
-`[shunt: N input tokens | M output | Xs | model]`. Files larger than `SHUNT_NUM_CTX` are chunked
-automatically, preserving original line numbers, and the script warns when the prompt gets close
-to truncation.
+The answer goes to stdout grouped by file, with the path written once and the findings indented
+under it:
+
+```text
+/path/to/install.sh
+  186 conferir_checksum: aborts when the sha256 does not match
+  220-245 acrescenta_ao_path: writes the managed block into the shell rc
+```
+
+Grouping exists because the path was the largest repeated string in the answer. At 63 characters
+across 35 findings it cost more than the findings themselves; measured over three samples, the
+grouped shape cut the answer by 26%.
+
+**The question sets the price.** The answer enters your context, the file does not, so what
+matters is the size of the answer, and that depends entirely on what you asked. "Which line
+verifies the checksum?" comes back at 1% of the file. "Explain what the script does" comes back
+at 10% or more, and on a small file it can exceed 100%, at which point reading it directly would
+have cost the same. The script warns on stderr when the answer passes `SHUNT_WARN_RATIO` (50%)
+of the content read, and `shunt-stats` reports the median and the worst case. Two narrow
+questions are cheaper than one broad one, and a follow-up on the same paths is free.
+
+stderr also carries `[shunt: N input tokens | M output | Xs | model]`. Files larger than
+`SHUNT_NUM_CTX` are chunked automatically, preserving original line numbers, and the script
+warns when the prompt gets close to truncation.
 
 Two phases, and the second is mandatory before editing: **ask** the local model, then **read
 surgically** with `offset`/`limit` on the slice it pointed at. The local model can be off by a
@@ -275,6 +295,7 @@ few lines, so verify exact values before an `Edit`.
 | `SHUNT_EDIT_WINDOW` | `80` | largest single editing read |
 | `SHUNT_ESCAPE_BUDGET` | `80` | extra lines for editing reads after the budget is spent |
 | `SHUNT_MAX_TOTAL_LINES` | `3 × MIN_LINES` | sum across several files in one command |
+| `SHUNT_WARN_RATIO` | `50` | warns when the answer exceeds this share of the content read |
 | `SHUNT_TIMEOUT_SECONDS` | `180` | `curl` timeout |
 | `SHUNT_HOOK_LOG` | `~/.claude/shunt.log` | TSV decision log |
 | `SHUNT_ASSUME_OLLAMA` | empty | `1` skips the probe and always blocks (tests/CI) |
@@ -387,6 +408,10 @@ Code comments and inline documentation are in Brazilian Portuguese.
 
 ## Changelog
 
+- **0.6.0** — the answer is grouped by file, with the path written once instead of repeated in
+  every finding, which cut it by 26% over three samples. `bulk-read` warns when the answer
+  exceeds `SHUNT_WARN_RATIO` of the content read, the ratio goes into the log, and `shunt-stats`
+  reports median and worst case, because a broad question can cost more than the file itself.
 - **0.5.0** — the threshold became a per-file reading budget and every exempt band is gone,
   closing the slicing route that let whole files reach the context. The escape allowance after
   the budget is spent is measured in lines. The routing text stops publishing the limits. The

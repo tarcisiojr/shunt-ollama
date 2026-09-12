@@ -89,7 +89,7 @@ Para comparação, a 0.1.0 registrou **1** interceptação no mesmo histórico.
 
 | Entrada | Tokens ao Ollama | Tokens ao Claude | Tempo |
 |---|---|---|---|
-| 1 arquivo de 276 linhas | 3.318 | 2.252 | 53 s |
+| 1 arquivo de 276 linhas, pergunta ampla | 3.318 | 2.252 | 53 s |
 | 1 arquivo de 575 linhas (2 partes) | 13.383 | 378 | 68 s |
 
 A segunda linha é o caso típico: o arquivo custou 13 mil tokens ao modelo local e 378 ao
@@ -104,7 +104,7 @@ pedidas e a cobertura já alcançada, e o `shunt-stats` transforma isso numa com
 versões e num relatório de fatiamento. Os números acima saíram do próprio log, não da leitura
 de transcripts.
 
-**Suíte de testes.** 47 casos, montados a partir dos comandos exatos que versões anteriores
+**Suíte de testes.** 49 casos, montados a partir dos comandos exatos que versões anteriores
 deixaram passar.
 
 ## Como funciona
@@ -257,10 +257,30 @@ git diff | scripts/bulk-read --question "Resuma por arquivo" --stdin
 Diretórios em `--paths` são expandidos, ignorando `.git` e `node_modules`. Sem `--question`, a
 pergunta padrão pede símbolos públicos, responsabilidades, dependências e pontos de entrada.
 
-A resposta sai no stdout como `- Nome (path:Lini-Lfim): descrição`. No stderr aparece
-`[shunt: N tokens entrada | M saída | Xs | modelo]`. Arquivos maiores que `SHUNT_NUM_CTX` são
-fatiados automaticamente, preservando a numeração original, e o script avisa quando o prompt
-chega perto de truncar.
+A resposta sai no stdout agrupada por arquivo, com o caminho escrito uma vez e os achados
+indentados abaixo:
+
+```text
+/caminho/para/install.sh
+  186 conferir_checksum: aborta quando o sha256 não casa
+  220-245 acrescenta_ao_path: escreve o bloco gerenciado no rc do shell
+```
+
+O agrupamento existe porque o caminho era a maior string repetida da resposta. Com 63 caracteres
+em 35 achados, custava mais que os próprios achados; medido em três amostras, o formato agrupado
+reduziu a resposta em 26%.
+
+**A pergunta define o custo.** A resposta entra no seu contexto, o arquivo não, então o que
+importa é o tamanho da resposta, e ele depende inteiramente do que foi perguntado. "Em que linha
+o checksum é conferido?" volta com 1% do arquivo. "Explique o que o script faz" volta com 10% ou
+mais, e num arquivo pequeno pode passar de 100%, ponto em que ler direto teria custado o mesmo.
+O script avisa no stderr quando a resposta passa de `SHUNT_WARN_RATIO` (50%) do conteúdo lido, e
+o `shunt-stats` informa a mediana e o pior caso. Duas perguntas estreitas saem mais baratas que
+um panorama, e um follow-up nos mesmos paths é gratuito.
+
+No stderr também aparece `[shunt: N tokens entrada | M saída | Xs | modelo]`. Arquivos maiores
+que `SHUNT_NUM_CTX` são fatiados automaticamente, preservando a numeração original, e o script
+avisa quando o prompt chega perto de truncar.
 
 Fluxo em duas fases, e a segunda é obrigatória antes de editar: **pergunte** ao modelo local,
 depois **leia cirurgicamente** com `offset`/`limit` no trecho apontado. O modelo local pode
@@ -278,6 +298,7 @@ errar alguns números de linha, então confira valores exatos antes de um `Edit`
 | `SHUNT_EDIT_WINDOW` | `80` | maior leitura de edição individual |
 | `SHUNT_ESCAPE_BUDGET` | `80` | linhas extras para leituras de edição após o orçamento acabar |
 | `SHUNT_MAX_TOTAL_LINES` | `3 × MIN_LINES` | soma de vários arquivos num só comando |
+| `SHUNT_WARN_RATIO` | `50` | avisa quando a resposta passa desta fração do conteúdo lido |
 | `SHUNT_TIMEOUT_SECONDS` | `180` | timeout do `curl` |
 | `SHUNT_HOOK_LOG` | `~/.claude/shunt.log` | log TSV de decisões |
 | `SHUNT_ASSUME_OLLAMA` | vazio | `1` pula a sondagem e bloqueia sempre (testes/CI) |
@@ -390,6 +411,11 @@ Os comentários e a documentação no código estão em português brasileiro.
 
 ## Changelog
 
+- **0.6.0** — a resposta passa a ser agrupada por arquivo, com o caminho escrito uma vez em vez
+  de repetido em cada achado, o que a reduziu em 26% medido em três amostras. O `bulk-read`
+  avisa quando a resposta passa de `SHUNT_WARN_RATIO` do conteúdo lido, a razão entra no log, e
+  o `shunt-stats` informa mediana e pior caso, porque uma pergunta ampla pode custar mais que o
+  próprio arquivo.
 - **0.5.0** — o limiar virou orçamento de leitura por arquivo e todas as faixas isentas
   desapareceram, fechando o caminho de fatiamento que deixava arquivos inteiros chegarem ao
   contexto. O saldo de escape depois de o orçamento acabar é medido em linhas. O texto de

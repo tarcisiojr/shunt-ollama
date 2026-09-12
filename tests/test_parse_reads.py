@@ -406,8 +406,10 @@ class StatsTest(unittest.TestCase):
             "2026-09-01T10:01:00\ts1\tRead\tallow\tcounted\t/a.py\t900\t120",
             # versionado, 9 colunas
             "2026-09-02T10:00:00\ts2\tBash\tdeny\tsingle-read\t/b.py\t900\t900\t0.4.0",
-            "2026-09-02T10:02:00\t-\tbulk-read\tok\tfiles=1;pin=9000;pout=300;dur=40"
-            "\t/b.py\t900\t0\t0.4.0",
+            "2026-09-02T10:02:00\t-\tbulk-read\tok\t"
+            "files=1;pin=9000;pout=300;dur=40;ratio=8\t/b.py\t900\t0\t0.4.0",
+            "2026-09-02T10:30:00\t-\tbulk-read\tok\t"
+            "files=1;pin=700;pout=120;dur=3;ratio=144\t/c.py\t20\t0\t0.4.0",
             "2026-09-02T10:03:00\ts2\tRead\tallow\talways-free\t/b.py\t900\t20\t0.4.0",
             # linha corrompida, deve ser ignorada
             "lixo",
@@ -447,11 +449,33 @@ class StatsTest(unittest.TestCase):
 
     def test_delegacao_contabilizada(self):
         out = self.run_stats()
-        self.assertIn("1 delegação(ões)", out)
-        self.assertIn("9000", out)   # tokens enviados ao Ollama
+        self.assertIn("2 delegação(ões)", out)
+        self.assertIn("9700", out)   # tokens enviados ao Ollama, somando as duas
 
     def test_alerta_de_amostra_pequena(self):
         self.assertIn("amostra pequena", self.run_stats())
+
+    def test_eficiencia_das_delegacoes(self):
+        """A razão resposta/conteúdo é o que diz se a delegação valeu."""
+        out = self.run_stats()
+        self.assertIn("resposta em % do conteúdo lido", out)
+        self.assertIn("144%", out)
+        self.assertIn("renderam pouco", out)
+
+    def test_delegacao_eficiente_nao_gera_alerta(self):
+        log = os.path.join(self.tmp.name, "bom.log")
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write("2026-09-02T10:00:00\ts1\tBash\tdeny\tsingle-read"
+                     "\t/b.py\t900\t900\t0.6.0\t1-900\t0\n")
+            fh.write("2026-09-02T10:02:00\t-\tbulk-read\tok\t"
+                     "files=1;pin=9000;pout=300;dur=40;ratio=8"
+                     "\t/b.py\t900\t0\t0.6.0\t-\t0\n")
+        proc = subprocess.run(
+            [os.path.join(ROOT, "scripts", "shunt-stats"), "--log", log],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("mediana 8%", proc.stdout)
+        self.assertNotIn("renderam pouco", proc.stdout)
 
 
 class SessionStartTest(unittest.TestCase):

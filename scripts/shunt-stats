@@ -14,6 +14,7 @@ Uso: shunt-stats [--log CAMINHO] [--since AAAA-MM-DD] [--version 0.5.0]
 import argparse
 import collections
 import datetime as dt
+import statistics
 import os
 import sys
 
@@ -88,6 +89,8 @@ def summarize(rows):
         "returned": sum(kv(r["reason"]).get("pout", 0) for r in bulk_ok),
         "seconds": sum(kv(r["reason"]).get("dur", 0) for r in bulk_ok),
         "files": sum(kv(r["reason"]).get("files", 0) for r in bulk_ok),
+        "ratios": [kv(r["reason"]).get("ratio") for r in bulk_ok
+                   if kv(r["reason"]).get("ratio") is not None],
     }
 
 
@@ -249,6 +252,15 @@ def main():
         print(f"  economia líquida estimada: "
               f"{overall['sent'] - overall['returned']} tokens "
               f"| tempo total: {overall['seconds']}s")
+        ratios = overall["ratios"]
+        if ratios:
+            ruins = [r for r in ratios if r >= 50]
+            print(f"  resposta em % do conteúdo lido: mediana "
+                  f"{statistics.median(ratios):.0f}%, pior {max(ratios)}%")
+            if ruins:
+                print(f"  {len(ruins)} de {len(ratios)} delegações renderam pouco "
+                      "(50%+). Pergunta ampla faz o modelo local enumerar tudo:\n"
+                      "  pergunte o que precisa, não um panorama.")
 
     if denies:
         pct = 100 * overall["converted"] / len(denies)
