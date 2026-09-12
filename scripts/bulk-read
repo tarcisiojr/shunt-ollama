@@ -175,21 +175,21 @@ done
 
 char_count=0
 for c in "${chunks[@]}"; do char_count=$((char_count + $(wc -c < "$c" | tr -d ' '))); done
-economizado=$((char_count / 4))
-echo "[shunt: ~$economizado tokens que o Claude NÃO gastou lendo | ${#src_files[@]} fonte(s), $n parte(s) | delegado a bulk-reader]" >&2
+content_tokens=$((char_count / 4))
+echo "[shunt: ~$content_tokens tokens que o Claude NÃO gastou lendo | ${#src_files[@]} fonte(s), $n parte(s) | delegado a bulk-reader]" >&2
 
 # A delegação só compensa se a resposta for bem menor que o conteúdo enviado.
 # A comparação é contra o conteúdo, e não contra o prompt_eval_count do Ollama,
 # porque aquele soma o system prompt e faria qualquer razão parecer ótima.
-razao=0
-if [ "$economizado" -gt 0 ]; then
-  razao=$((SHUNT_POUT_TOTAL * 100 / economizado))
-  if [ "$razao" -ge 100 ]; then
-    echo "[shunt: ATENÇÃO — a resposta ($SHUNT_POUT_TOTAL tokens) ficou maior que o conteúdo lido (~$economizado). Não houve economia: ler o arquivo direto custaria o mesmo. Refaça com uma pergunta específica em vez de pedir um panorama.]" >&2
-  elif [ "$razao" -ge "$SHUNT_WARN_RATIO" ]; then
-    echo "[shunt: aviso — a resposta ocupou ${razao}% do conteúdo lido. Perguntas específicas comprimem muito mais; considere refazer perguntando só o que precisa.]" >&2
+ratio=0
+if [ "$content_tokens" -gt 0 ]; then
+  ratio=$((SHUNT_POUT_TOTAL * 100 / content_tokens))
+  if [ "$ratio" -ge 100 ]; then
+    echo "[shunt: ATENÇÃO — a resposta ($SHUNT_POUT_TOTAL tokens) ficou maior que o conteúdo lido (~$content_tokens). Não houve economia: ler o arquivo direto custaria o mesmo. Refaça com uma pergunta específica em vez de pedir um panorama.]" >&2
+  elif [ "$ratio" -ge "$SHUNT_WARN_RATIO" ]; then
+    echo "[shunt: aviso — a resposta ocupou ${ratio}% do conteúdo lido. Perguntas específicas comprimem muito mais; considere refazer perguntando só o que precisa.]" >&2
   fi
 fi
 shunt_log_line bulk-read ok \
-  "files=${#src_files[@]};chunks=$n;pin=$SHUNT_PIN_TOTAL;pout=$SHUNT_POUT_TOTAL;dur=$SHUNT_DUR_TOTAL;ratio=$razao" \
+  "files=${#src_files[@]};chunks=$n;pin=$SHUNT_PIN_TOTAL;pout=$SHUNT_POUT_TOTAL;dur=$SHUNT_DUR_TOTAL;ratio=$ratio" \
   "${src_labels[0]}" "$total_lines_all" 0

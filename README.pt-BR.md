@@ -117,7 +117,8 @@ Três hooks, um script de delegação e um de métricas.
 | `hooks/check-bash-read` | `PreToolUse` em `Bash` e em ferramentas MCP que executam shell. Analisa `cat`, `head`, `tail`, `sed -n`, `awk`, `nl`, `bat`, `rtk read`. |
 | `hooks/session-start` | `SessionStart`. Injeta a regra de roteamento e registra se o Ollama está de pé. |
 | `scripts/bulk-read` | Monta a mensagem, chama o Ollama, imprime a resposta. |
-| `scripts/shunt-stats` | Resume o log: decisões, arquivos mais bloqueados, tokens delegados. |
+| `scripts/shunt-stats` | Resume o log: comparação por versão, cobertura, fatiamento, tokens delegados. |
+| `scripts/release` | Valida, cria a tag e publica a release da versão do manifesto. |
 
 O `session-start` é o que faz o plugin ser usado em vez de descoberto por acidente. Sem ele,
 o modelo só aprende que o shunt existe quando um bloqueio acontece, e a reação natural a um
@@ -306,6 +307,9 @@ errar alguns números de linha, então confira valores exatos antes de um `Edit`
 
 ## Métricas e depuração
 
+Duas skills expõem isso ao Claude: a `bulk-reader` delega uma leitura, e a `shunt-stats` lê e
+interpreta estes números, então perguntar "como o plugin está se comportando?" já basta.
+
 ```bash
 scripts/shunt-stats
 scripts/shunt-stats --since 2026-09-01
@@ -388,14 +392,31 @@ O estado por sessão fica em `$TMPDIR/shunt-state-<session_id>.json`. Apagar res
 
 ```bash
 python3 -m unittest discover -s tests
-flake8 --max-line-length=100 hooks/lib tests scripts/shunt-stats
+flake8 --max-line-length=100 hooks/lib tests scripts/shunt-stats scripts/release
 shellcheck scripts/bulk-read scripts/lib/ollama.sh
 ```
+
+### Publicando uma versão
+
+Suba o `version` nos dois arquivos de `.claude-plugin/`, comite, faça push e então:
+
+```bash
+scripts/release --dry-run   # mostra a tag, o título e as notas que publicaria
+scripts/release
+```
+
+Ele se recusa a rodar com a árvore suja, com a tag já existente ou com commits não enviados, e
+roda os testes, o flake8 e o shellcheck antes de criar a tag, porque uma tag aponta para um
+commit para sempre. As notas saem da entrada daquela versão no changelog deste README. Publicar
+a release exige o `gh` autenticado; sem ele a tag é criada e enviada de todo modo, e o comando
+da release fica impresso.
 
 Os casos vieram de comandos reais de sessões em que a 0.1.0 não interceptou nada. Ao adicionar
 suporte a um comando novo, escreva primeiro o caso que hoje escapa.
 
-Os comentários e a documentação no código estão em português brasileiro.
+**Convenção de idioma:** identificadores sempre em inglês, inclusive nomes de teste.
+Comentários, docstrings e as mensagens impressas para o usuário em português brasileiro, que é
+também o idioma do texto de roteamento que os hooks injetam.
 
 ## Limitações conhecidas
 
@@ -411,6 +432,9 @@ Os comentários e a documentação no código estão em português brasileiro.
 
 ## Changelog
 
+- **0.7.0** — uma skill `shunt-stats` deixa o Claude relatar e interpretar as métricas quando
+  perguntado, e o `scripts/release` valida, cria a tag e publica a release da versão do
+  manifesto. As versões 0.2.0 a 0.6.0 foram tagueadas retroativamente.
 - **0.6.0** — a resposta passa a ser agrupada por arquivo, com o caminho escrito uma vez em vez
   de repetido em cada achado, o que a reduziu em 26% medido em três amostras. O `bulk-read`
   avisa quando a resposta passa de `SHUNT_WARN_RATIO` do conteúdo lido, a razão entra no log, e

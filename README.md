@@ -116,7 +116,8 @@ Three hooks, one delegation script, one metrics script.
 | `hooks/check-bash-read` | `PreToolUse` on `Bash` and on MCP tools that execute shell. Parses `cat`, `head`, `tail`, `sed -n`, `awk`, `nl`, `bat`, `rtk read`. |
 | `hooks/session-start` | `SessionStart`. Injects the routing rule and records whether Ollama is up. |
 | `scripts/bulk-read` | Builds the message, calls Ollama, prints the answer. |
-| `scripts/shunt-stats` | Summarizes the log: decisions, most-blocked files, delegated tokens. |
+| `scripts/shunt-stats` | Summarizes the log: version comparison, coverage, slicing, delegated tokens. |
+| `scripts/release` | Validates, tags and publishes a release for the version in the manifest. |
 
 `session-start` is what makes the plugin get used rather than discovered by accident. Without
 it, the model only learns the shunt exists when a block happens, and the natural reaction to a
@@ -303,6 +304,9 @@ few lines, so verify exact values before an `Edit`.
 
 ## Metrics and debugging
 
+Two skills expose this to Claude: `bulk-reader` delegates a read, and `shunt-stats` reads and
+interprets these numbers, so asking "how is the plugin doing?" is enough.
+
 ```bash
 scripts/shunt-stats
 scripts/shunt-stats --since 2026-09-01
@@ -385,14 +389,31 @@ running totals.
 
 ```bash
 python3 -m unittest discover -s tests
-flake8 --max-line-length=100 hooks/lib tests scripts/shunt-stats
+flake8 --max-line-length=100 hooks/lib tests scripts/shunt-stats scripts/release
 shellcheck scripts/bulk-read scripts/lib/ollama.sh
 ```
+
+### Releasing a version
+
+Bump `version` in both files under `.claude-plugin/`, commit, push, then:
+
+```bash
+scripts/release --dry-run   # shows the tag, title and notes it would publish
+scripts/release
+```
+
+It refuses to run on a dirty tree, on an already existing tag, or with unpushed commits, and it
+runs the tests, flake8 and shellcheck before tagging, because a tag points at a commit forever.
+The release notes come from that version's changelog entry in this README. Publishing the
+release needs `gh` authenticated; without it the tag is still created and pushed, and the
+command for the release is printed.
 
 The cases come from real commands in sessions where 0.1.0 intercepted nothing. When adding
 support for a new command, write the escaping case first.
 
-Code comments and inline documentation are in Brazilian Portuguese.
+**Language convention:** identifiers are always in English, including test names. Comments,
+docstrings, and the messages printed to the user are in Brazilian Portuguese, which is also the
+language of the routing text the hooks inject.
 
 ## Known limitations
 
@@ -408,6 +429,9 @@ Code comments and inline documentation are in Brazilian Portuguese.
 
 ## Changelog
 
+- **0.7.0** — a `shunt-stats` skill lets Claude report and interpret the metrics on request, and
+  `scripts/release` validates, tags and publishes a release for the version in the manifest.
+  Versions 0.2.0 through 0.6.0 were tagged retroactively.
 - **0.6.0** — the answer is grouped by file, with the path written once instead of repeated in
   every finding, which cut it by 26% over three samples. `bulk-read` warns when the answer
   exceeds `SHUNT_WARN_RATIO` of the content read, the ratio goes into the log, and `shunt-stats`

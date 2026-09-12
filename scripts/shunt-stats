@@ -171,13 +171,13 @@ def print_coverage(rows, top):
               f"{r['reads']:>9} {r['slices']:>7}  {name}")
 
     # Fatiamento: arquivo acima do limiar, muita cobertura, leituras pequenas.
-    suspeitos = [r for r in cov
-                 if r["pct"] >= 50 and r["reads"] >= 3
-                 and r["slices"] >= r["reads"] - 1]
-    print(f"\n  Fatiamento: {len(suspeitos)} arquivo(s) com 50%+ de cobertura "
+    sliced = [r for r in cov
+              if r["pct"] >= 50 and r["reads"] >= 3
+              and r["slices"] >= r["reads"] - 1]
+    print(f"\n  Fatiamento: {len(sliced)} arquivo(s) com 50%+ de cobertura "
           f"montada em 3+ leituras de até {SLICE_SIZE} linhas")
-    if suspeitos:
-        for r in sorted(suspeitos, key=lambda x: -x["covered"])[:top]:
+    if sliced:
+        for r in sorted(sliced, key=lambda x: -x["covered"])[:top]:
             name = os.path.basename(r["path"])
             print(f"    {r['covered']:>6} de {r['total']:<6} em "
                   f"{r['reads']:>2} leituras  {name}")
@@ -254,11 +254,11 @@ def main():
               f"| tempo total: {overall['seconds']}s")
         ratios = overall["ratios"]
         if ratios:
-            ruins = [r for r in ratios if r >= 50]
+            poor = [r for r in ratios if r >= 50]
             print(f"  resposta em % do conteúdo lido: mediana "
                   f"{statistics.median(ratios):.0f}%, pior {max(ratios)}%")
-            if ruins:
-                print(f"  {len(ruins)} de {len(ratios)} delegações renderam pouco "
+            if poor:
+                print(f"  {len(poor)} de {len(ratios)} delegações renderam pouco "
                       "(50%+). Pergunta ampla faz o modelo local enumerar tudo:\n"
                       "  pergunte o que precisa, não um panorama.")
 

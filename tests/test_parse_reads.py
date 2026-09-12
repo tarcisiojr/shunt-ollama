@@ -40,30 +40,33 @@ class ParseReadsTest(unittest.TestCase):
     def reads(self, cmd, cwd=None):
         return parse_reads(cmd, cwd or self.dir)[0]
 
-    def test_cat_simples(self):
+    def test_plain_cat(self):
         self.assertEqual(self.reads(f"cat {self.big}"), {self.big: [(1, None)]})
 
-    def test_cd_e_cat_relativo(self):
+    def test_cd_then_relative_cat(self):
+        """O `cd X && cat f` que escapava da regex original."""
         reads = self.reads(f"cd {self.dir}/sub && cat rel.md", cwd="/")
         self.assertEqual(reads, {self.sub: [(1, None)]})
 
-    def test_stderr_redirect_nao_esconde(self):
+    def test_stderr_redirect_does_not_hide(self):
+        """O `2>/dev/null` fazia o hook antigo desistir da análise."""
         self.assertIn(self.big, self.reads(f"cat {self.big} 2>/dev/null"))
         self.assertIn(self.big, self.reads(f"cat {self.big} 2>&1"))
 
-    def test_stdout_para_arquivo_ignorado(self):
+    def test_stdout_to_file_is_ignored(self):
+        """Redirecionar para arquivo não é leitura para o contexto."""
         self.assertEqual(self.reads(f"cat {self.big} > /tmp/x"), {})
 
-    def test_pipe_filtro_ignorado(self):
+    def test_filtering_pipe_is_ignored(self):
         self.assertEqual(self.reads(f"cat {self.big} | grep linha"), {})
         self.assertEqual(self.reads(f"grep -n foo {self.big} | head -5"), {})
         self.assertEqual(self.reads(f"wc -l < {self.big}"), {})
 
-    def test_pipe_head_limita(self):
+    def test_head_in_pipe_caps_lines(self):
         self.assertEqual(self.reads(f"cat {self.big} | head -40"),
                          {self.big: [(1, 40)]})
 
-    def test_sed_faixa(self):
+    def test_sed_ranges(self):
         self.assertEqual(self.reads(f"sed -n '30,120p' {self.big}"),
                          {self.big: [(30, 120)]})
         self.assertEqual(self.reads(f"sed -n 1,50p < {self.big}"),
@@ -76,7 +79,7 @@ class ParseReadsTest(unittest.TestCase):
         self.assertEqual(self.reads(f"sed 's/a/b/' {self.big}"),
                          {self.big: [(1, None)]})
 
-    def test_head_tail_variantes(self):
+    def test_head_and_tail_flag_variants(self):
         for cmd in (f"head -150 {self.big}", f"head -n 150 {self.big}",
                     f"head -n150 {self.big}", f"head --lines=150 {self.big}"):
             self.assertEqual(self.reads(cmd), {self.big: [(1, 150)]}, cmd)
@@ -87,7 +90,7 @@ class ParseReadsTest(unittest.TestCase):
         self.assertEqual(self.reads(f"head -c 5000 {self.big}"),
                          {self.big: [(1, 100)]})
 
-    def test_awk(self):
+    def test_awk_programs(self):
         self.assertEqual(self.reads(f"awk 'NR>=10 && NR<=50' {self.big}"),
                          {self.big: [(10, 50)]})
         self.assertEqual(self.reads(f"awk '{{print}}' {self.big}"),
@@ -95,13 +98,14 @@ class ParseReadsTest(unittest.TestCase):
         self.assertEqual(self.reads(f"awk '{{print $1}}' {self.big}"), {})
         self.assertEqual(self.reads(f"awk '/^## X/,0' {self.big} | head -220"), {})
 
-    def test_rtk_e_wrappers(self):
+    def test_cli_proxy_and_wrappers(self):
+        """Proxies de CLI reescrevem `cat` antes do hook enxergar."""
         self.assertEqual(self.reads(f"rtk read {self.big}"),
                          {self.big: [(1, None)]})
         self.assertEqual(self.reads(f"FOO=1 sudo cat -n {self.big}"),
                          {self.big: [(1, None)]})
 
-    def test_encadeamentos(self):
+    def test_command_chaining(self):
         reads = self.reads(f"echo x && cat {self.big}; ls")
         self.assertEqual(reads, {self.big: [(1, None)]})
         reads = self.reads(f"ls\ncat {self.other}")
@@ -109,28 +113,29 @@ class ParseReadsTest(unittest.TestCase):
         reads = self.reads(f"cat {self.big} {self.other}")
         self.assertEqual(set(reads), {self.big, self.other})
 
-    def test_glob(self):
+    def test_glob_expansion(self):
         reads = self.reads(f"cat {self.dir}/*.md")
         self.assertEqual(set(reads), {self.big, self.other})
 
-    def test_variaveis_e_loops_sao_notas(self):
+    def test_variables_and_loops_are_skips(self):
+        """Ponto cego conhecido: vira nota no log, não aprovação silenciosa."""
         reads, notes = parse_reads('for f in a b; do cat "$f"; done', self.dir)
         self.assertEqual(reads, {})
         self.assertTrue(any(n.startswith("unresolved") for n in notes))
         reads, notes = parse_reads("python3 - <<'EOF'\nprint(1)\nEOF", self.dir)
         self.assertEqual((reads, notes), ({}, ["heredoc"]))
 
-    def test_arquivo_inexistente(self):
+    def test_missing_file(self):
         self.assertEqual(self.reads("cat /nao/existe.md"), {})
 
 
 class RangeMathTest(unittest.TestCase):
-    def test_merge_e_coverage(self):
+    def test_merge_and_coverage(self):
         self.assertEqual(sc.merge_ranges([(1, 5), (4, 10), (12, 12)]),
                          [(1, 10), (12, 12)])
         self.assertEqual(sc.coverage([(1, 90), (1, 90)]), 90)
 
-    def test_resolve(self):
+    def test_resolve_range(self):
         self.assertEqual(sc.resolve_range((1, None), 500), (1, 500))
         self.assertEqual(sc.resolve_range((-20, None), 500), (481, 500))
         self.assertEqual(sc.resolve_range((30, 9999), 500), (30, 500))
@@ -151,15 +156,15 @@ class ThresholdFloorTest(unittest.TestCase):
         min_lines, adjusted = out.stdout.split()
         return int(min_lines), adjusted == "True"
 
-    def test_limiar_baixo_e_elevado_ao_piso(self):
+    def test_low_threshold_is_raised_to_floor(self):
         self.assertEqual(self.run_probe({"SHUNT_MIN_LINES": "100",
                                          "SHUNT_EDIT_WINDOW": "80"}), (160, True))
 
-    def test_limiar_alto_e_respeitado(self):
+    def test_high_threshold_is_kept(self):
         self.assertEqual(self.run_probe({"SHUNT_MIN_LINES": "400",
                                          "SHUNT_EDIT_WINDOW": "80"}), (400, False))
 
-    def test_default(self):
+    def test_default_threshold(self):
         env = {k: v for k, v in os.environ.items()
                if k not in ("SHUNT_MIN_LINES", "SHUNT_EDIT_WINDOW")}
         code = ("import sys; sys.path.insert(0, %r); import shunt_common as sc; "
@@ -177,13 +182,13 @@ class EstimateTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_estimativa_tem_partes_tempo_e_tokens(self):
+    def test_estimate_returns_parts_time_and_tokens(self):
         parts, seconds, tokens = sc.estimate_delegation([self.big])
         self.assertGreaterEqual(parts, 1)
         self.assertGreater(seconds, 0)
         self.assertGreater(tokens, 0)
 
-    def test_arquivo_inexistente_nao_estoura(self):
+    def test_estimate_survives_missing_file(self):
         self.assertEqual(sc.estimate_delegation(["/nao/existe"]), (1, 0, 0))
 
 
@@ -226,22 +231,23 @@ class HookEndToEndTest(unittest.TestCase):
                     if len(ln.rstrip("\n").split("\t")) in (8, 9, 11)]
 
     # -- Read ---------------------------------------------------------------
-    def test_read_completo_nega(self):
+    def test_full_read_is_denied(self):
         out = self.run_hook("check-file-size", "Read", {"file_path": self.big})
         self.assertEqual(self.decision(out), "deny")
 
-    def test_read_com_limit_grande_nega(self):
+    def test_read_with_large_limit_is_denied(self):
+        """A regra antiga liberava qualquer leitura que tivesse offset ou limit."""
         out = self.run_hook("check-file-size", "Read",
                             {"file_path": self.big, "limit": 620})
         self.assertEqual(self.decision(out), "deny")
 
     # -- Bash ---------------------------------------------------------------
-    def test_bash_cat_nega(self):
+    def test_bash_cat_is_denied(self):
         out = self.run_hook("check-bash-read", "Bash",
                             {"command": f"cd {self.dir} && cat big.md 2>/dev/null"})
         self.assertEqual(self.decision(out), "deny")
 
-    def test_bash_arquivo_pequeno_passa(self):
+    def test_bash_small_file_passes(self):
         out = self.run_hook("check-bash-read", "Bash",
                             {"command": f"cat {self.small}"})
         self.assertEqual(self.decision(out), "allow")
@@ -254,7 +260,7 @@ class HookEndToEndTest(unittest.TestCase):
 
     # -- Mensagem de deny ---------------------------------------------------
 
-    def test_arquivo_pequeno_fora_de_alcance(self):
+    def test_small_file_is_out_of_scope(self):
         """Abaixo do limiar o plugin nao se aplica: nao vale delegar."""
         small = make_file(self.dir, "mid.md", 150)
         for _ in range(6):
@@ -263,7 +269,7 @@ class HookEndToEndTest(unittest.TestCase):
             self.assertEqual(self.decision(out), "allow")
         self.assertIn("small-file", self.reasons_logged())
 
-    def test_orcamento_por_arquivo_bloqueia_fatiamento(self):
+    def test_per_file_budget_blocks_slicing(self):
         """O contorno que devolvia arquivos inteiros em pedacos de 80 linhas."""
         decisions = []
         for start in range(1, 900, 80):
@@ -273,7 +279,7 @@ class HookEndToEndTest(unittest.TestCase):
         self.assertIn("deny", decisions)
         self.assertLessEqual(decisions.count("allow"), 4)
 
-    def test_fatias_minimas_tambem_esgotam(self):
+    def test_tiny_slices_also_drain_budget(self):
         """Leituras de 20 linhas nao sao mais isentas: somam no orcamento."""
         decisions = []
         for start in range(1, 500, 20):
@@ -282,7 +288,8 @@ class HookEndToEndTest(unittest.TestCase):
             decisions.append(self.decision(out))
         self.assertIn("deny", decisions)
 
-    def test_saldo_de_escape_permite_editar_depois_de_estourar(self):
+    def test_escape_balance_allows_editing(self):
+        """Editar o trecho apontado pelo modelo local tem de continuar possível."""
         self.run_hook("check-bash-read", "Bash",
                       {"command": f"sed -n '1,180p' {self.big}"})
         out = self.run_hook("check-file-size", "Read",
@@ -290,7 +297,8 @@ class HookEndToEndTest(unittest.TestCase):
         self.assertEqual(self.decision(out), "allow")
         self.assertIn("escape", self.reasons_logged())
 
-    def test_saldo_de_escape_e_finito(self):
+    def test_escape_balance_is_finite(self):
+        """Uma isenção sem cota é uma isenção total."""
         self.run_hook("check-bash-read", "Bash",
                       {"command": f"sed -n '1,180p' {self.big}"})
         decisions = []
@@ -301,13 +309,14 @@ class HookEndToEndTest(unittest.TestCase):
         self.assertEqual(decisions[-1], "deny")
         self.assertIn("escape-exhausted", self.reasons_logged())
 
-    def test_reler_mesma_faixa_nao_consome_orcamento(self):
+    def test_rereading_same_range_is_free(self):
         for _ in range(5):
             out = self.run_hook("check-bash-read", "Bash",
                                 {"command": f"sed -n '1,150p' {self.big}"})
             self.assertEqual(self.decision(out), "allow")
 
-    def test_log_traz_faixas_e_cobertura(self):
+    def test_log_carries_ranges_and_coverage(self):
+        """É o que dispensa reconstruir fatiamento pelos transcripts."""
         self.run_hook("check-bash-read", "Bash",
                       {"command": f"sed -n '10,60p' {self.big}"})
         with open(self.env["SHUNT_HOOK_LOG"], encoding="utf-8") as fh:
@@ -316,7 +325,7 @@ class HookEndToEndTest(unittest.TestCase):
         self.assertEqual(cols[9], "10-60")
         self.assertEqual(cols[10], "51")
 
-    def test_cobertura_acumula_entre_leituras(self):
+    def test_coverage_accumulates_across_reads(self):
         self.run_hook("check-bash-read", "Bash",
                       {"command": f"sed -n '1,50p' {self.big}"})
         self.run_hook("check-bash-read", "Bash",
@@ -326,7 +335,8 @@ class HookEndToEndTest(unittest.TestCase):
                         if len(ln.split("\t")) == 11]
         self.assertEqual(cobertos[-1], "100")
 
-    def test_deny_mostra_os_dois_custos_sem_publicar_limites(self):
+    def test_denial_compares_costs_without_publishing_limits(self):
+        """Um limite publicado é um mapa de contorno."""
         out = self.run_hook("check-file-size", "Read", {"file_path": self.big})
         reason = self.reason(out)
         self.assertIn("scripts/bulk-read", reason)
@@ -337,7 +347,7 @@ class HookEndToEndTest(unittest.TestCase):
         self.assertNotIn("25 linhas", reason)
 
     # -- Ferramentas MCP ----------------------------------------------------
-    def test_mcp_batch_nega(self):
+    def test_mcp_batch_is_denied(self):
         out = self.run_hook("check-bash-read",
                             "mcp__context-mode__ctx_batch_execute",
                             {"commands": [{"label": "x",
@@ -345,7 +355,7 @@ class HookEndToEndTest(unittest.TestCase):
                              "queries": ["a"]})
         self.assertEqual(self.decision(out), "deny")
 
-    def test_mcp_execute_python_passa(self):
+    def test_mcp_execute_python_passes(self):
         out = self.run_hook("check-bash-read",
                             "mcp__context-mode__ctx_execute",
                             {"language": "python",
@@ -353,14 +363,15 @@ class HookEndToEndTest(unittest.TestCase):
         self.assertEqual(self.decision(out), "allow")
 
     # -- Degradação segura --------------------------------------------------
-    def test_ollama_fora_libera(self):
+    def test_no_ollama_means_no_blocking(self):
+        """Bloquear sem ter para onde delegar só travaria o Claude."""
         env = {**self.env, "OLLAMA_HOST": "http://127.0.0.1:9"}
         env.pop("SHUNT_ASSUME_OLLAMA")
         out = self.run_hook("check-bash-read", "Bash",
                             {"command": f"cat {self.big}"}, env=env)
         self.assertEqual(self.decision(out), "allow")
 
-    def test_log_registra_decisoes_com_versao(self):
+    def test_log_records_decision_with_version(self):
         self.run_hook("check-bash-read", "Bash", {"command": f"cat {self.big}"})
         with open(self.env["SHUNT_HOOK_LOG"], encoding="utf-8") as fh:
             cols = fh.readline().rstrip("\n").split("\t")
@@ -368,13 +379,13 @@ class HookEndToEndTest(unittest.TestCase):
         self.assertEqual(cols[3], "deny")
         self.assertEqual(cols[8], sc.VERSION)
 
-    def test_versao_vem_do_manifesto(self):
+    def test_version_comes_from_manifest(self):
         import json as _json
         manifest = os.path.join(ROOT, ".claude-plugin", "plugin.json")
         with open(manifest, encoding="utf-8") as fh:
             self.assertEqual(sc.VERSION, _json.load(fh)["version"])
 
-    def test_versao_cai_para_dev_sem_manifesto(self):
+    def test_version_falls_back_to_dev(self):
         code = ("import sys; sys.path.insert(0, %r); import shunt_common as sc; "
                 "print(sc.VERSION)" % os.path.join(ROOT, "hooks", "lib"))
         env = {**os.environ, "CLAUDE_PLUGIN_ROOT": self.dir}
@@ -382,7 +393,7 @@ class HookEndToEndTest(unittest.TestCase):
                              text=True, env=env)
         self.assertEqual(out.stdout.strip(), "dev")
 
-    def test_versao_vem_do_diretorio_no_cache(self):
+    def test_version_comes_from_cache_directory(self):
         cache = os.path.join(self.dir, "0.9.1")
         os.makedirs(cache)
         code = ("import sys; sys.path.insert(0, %r); import shunt_common as sc; "
@@ -427,14 +438,15 @@ class StatsTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return proc.stdout
 
-    def test_compara_legado_com_versionado(self):
+    def test_compares_legacy_with_versioned(self):
+        """Sem ler as 8 colunas antigas, a linha de base desaparece."""
         out = self.run_stats()
         self.assertIn("Comparação por versão", out)
         self.assertIn("<=0.3.0", out)
         self.assertIn("0.4.0", out)
         self.assertIn("-> 0.4.0", out)
 
-    def test_conversao_por_versao(self):
+    def test_conversion_per_version(self):
         out = self.run_stats()
         linha = next(ln for ln in out.splitlines() if ln.strip().startswith("0.4.0"))
         self.assertIn("100%", linha)   # o único deny virou delegação
@@ -442,27 +454,27 @@ class StatsTest(unittest.TestCase):
                       if ln.strip().startswith("<=0.3.0"))
         self.assertIn("0%", legado)
 
-    def test_filtro_por_versao(self):
+    def test_version_filter(self):
         out = self.run_stats("--version", "0.4.0")
         self.assertIn("0.4.0", out)
         self.assertNotIn("<=0.3.0", out)
 
-    def test_delegacao_contabilizada(self):
+    def test_delegation_is_counted(self):
         out = self.run_stats()
         self.assertIn("2 delegação(ões)", out)
         self.assertIn("9700", out)   # tokens enviados ao Ollama, somando as duas
 
-    def test_alerta_de_amostra_pequena(self):
+    def test_small_sample_warning(self):
         self.assertIn("amostra pequena", self.run_stats())
 
-    def test_eficiencia_das_delegacoes(self):
+    def test_delegation_efficiency(self):
         """A razão resposta/conteúdo é o que diz se a delegação valeu."""
         out = self.run_stats()
         self.assertIn("resposta em % do conteúdo lido", out)
         self.assertIn("144%", out)
         self.assertIn("renderam pouco", out)
 
-    def test_delegacao_eficiente_nao_gera_alerta(self):
+    def test_efficient_delegation_has_no_warning(self):
         log = os.path.join(self.tmp.name, "bom.log")
         with open(log, "w", encoding="utf-8") as fh:
             fh.write("2026-09-02T10:00:00\ts1\tBash\tdeny\tsingle-read"
@@ -489,7 +501,7 @@ class SessionStartTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_injeta_regra_sem_publicar_limites(self):
+    def test_injects_rule_without_publishing_limits(self):
         proc = subprocess.run([os.path.join(ROOT, "hooks", "session-start")],
                               input=json.dumps({"session_id": "s1"}),
                               capture_output=True, text=True, env=self.env)

@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Cria a tag e a release da versão que está no manifesto do plugin.
+
+Roda a validação antes, porque uma tag aponta para um commit para sempre.
+A release exige o GitHub CLI (`gh`) autenticado; sem ele, a tag é criada e
+enviada e o comando da release fica impresso para uso posterior.
+
+Uso: scripts/release [--dry-run]
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def run(*args, check=True, capture=True):
+    return subprocess.run(args, cwd=ROOT, check=check, text=True,
+                          capture_output=capture)
+
+
+def manifest_version():
+    with open(os.path.join(ROOT, ".claude-plugin", "plugin.json"),
+              encoding="utf-8") as fh:
+        return json.load(fh)["version"]
+
+
+def release_notes(v):
+    """Extrai a entrada da versão do changelog do README em inglês."""
+    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
+        texto = fh.read()
+    m = re.search(r"(?ms)^- \*\*" + re.escape(v) + r"\*\* — (.*?)(?=\n- \*\*|\n\n)",
+                  texto)
+    if not m:
+        return f"See the changelog in README.md for {v}."
+    body = re.sub(r"\s+", " ", m.group(1)).strip()
+    return body
+
+
+def validate():
+    """Sem isso a tag pode apontar para um commit que não passa nos testes."""
+    etapas = [
+        ("testes", (sys.executable, "-m", "unittest", "discover", "-s", "tests")),
+        ("flake8", ("flake8", "--max-line-length=100", "hooks/lib", "tests",
+                    "scripts/shunt-stats")),
+        ("shellcheck", ("shellcheck", "-S", "warning", "scripts/bulk-read",
+                        "scripts/lib/ollama.sh")),
+    ]
+    for nome, cmd in etapas:
+        if not shutil.which(cmd[0]) and cmd[0] != sys.executable:
+            print(f"  ! {nome}: comando ausente, etapa pulada")
+            continue
+        r = run(*cmd, check=False)
+        if r.returncode != 0:
+            sys.exit(f"  x {nome} falhou:\n{r.stdout}\n{r.stderr}")
+        print(f"  ok {nome}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--dry-run", action="store_true",
+                    help="mostra o que faria, sem criar nada")
+    args = ap.parse_args()
+
+    v = manifest_version()
+    tag = f"v{v}"
+    print(f"versão no manifesto: {v}\n")
+
+    if run("git", "status", "--porcelain").stdout.strip():
+        sys.exit("árvore de trabalho suja: comite antes de versionar.")
+    if run("git", "tag", "-l", tag).stdout.strip():
+        sys.exit(f"{tag} já existe. Suba a versão no manifesto primeiro.")
+    pendentes = run("git", "log", "origin/main..HEAD", "--oneline").stdout.strip()
+    if pendentes:
+        sys.exit(f"commits não enviados:\n{pendentes}\nFaça push antes.")
+
+    print("validando:")
+    validate()
+
+    body = release_notes(v)
+    title = f"shunt-ollama {v}"
+    if args.dry_run:
+        head = run("git", "rev-parse", "--short", "HEAD").stdout.strip()
+        print(f"\n[dry-run] tag {tag} em {head}")
+        print(f"[dry-run] título: {title}")
+        print(f"[dry-run] release_notes: {body[:200]}...")
+        return
+
+    run("git", "tag", "-a", tag, "-m", f"{title} — {body[:120]}")
+    run("git", "push", "origin", tag, capture=False)
+    print(f"\ntag {tag} criada e enviada")
+
+    if shutil.which("gh"):
+        r = run("gh", "release", "create", tag, "--title", title,
+                "--notes", body, check=False)
+        if r.returncode == 0:
+            print(f"release publicada: {r.stdout.strip()}")
+        else:
+            print(f"release falhou: {r.stderr.strip()}")
+    else:
+        print("\ngh não encontrado; a tag está publicada. Para a release:\n"
+              "  brew install gh && gh auth login\n"
+              f"  gh release create {tag} --title {title!r} --notes '<release_notes>'")
+
+
+if __name__ == "__main__":
+    main()

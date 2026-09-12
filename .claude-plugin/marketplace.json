@@ -3,14 +3,14 @@
   "owner": { "name": "Tarcísio Jr" },
   "metadata": {
     "description": "Plugin que delega leitura de arquivos grandes a um modelo Ollama local",
-    "version": "0.6.0"
+    "version": "0.7.0"
   },
   "plugins": [
     {
       "name": "shunt-ollama",
       "source": "./",
       "description": "Roteia leituras grandes do Claude Code para um modelo Ollama local",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "author": { "name": "Tarcísio Jr" },
       "category": "development",
       "keywords": ["ollama", "context-window", "hooks", "local-llm"]
