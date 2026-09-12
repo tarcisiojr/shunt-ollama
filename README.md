@@ -48,27 +48,24 @@ the notion of a "mode" as a system-prompt file, and the message format built fro
 That last row matters. Recent Claude Code versions reject the old format with
 `Hook JSON output validation failed`, and a hook that fails validation **blocks nothing**.
 
-## Why version 0.2.0 exists
-
-Version 0.1.0 was a faithful port, with the original hooks nearly untouched. In real usage logs
-it fired **exactly once across two sessions**, and that single block was worked around: the
-model reread the same file in four slices with `sed -n '30,120p'`, `'121,200p'`, `'201,276p'`.
-It read everything, spent the same tokens, and the local model was never called.
-
-The investigation showed that almost no read passed through where the hooks were watching:
-
-- `cd project && cat AGENTS.md` did not match the `^cat ` regex
-- `cat file 2>/dev/null` was discarded by the redirection filter
-- `sed -n`, `awk`, and `head -150` inside a loop went unrecognized
-- `Read` with `limit: 620` on a 1200-line file passed, because the rule was "it has an `offset`
-  or a `limit`, so it must be a targeted read"
-- reads issued by other tools, such as third-party MCP servers, fell outside the matcher
-
-Version 0.2.0 rewrites the hooks in Python to close those gaps.
-
 ## Statistics
 
-**Replaying the 0.2.0 hooks against real history.** Tool calls from 105 recorded Claude Code
+**Effect of each version, straight from the log.** This is what `shunt-stats` prints, and it is
+the only table here you can reproduce on your own usage:
+
+| Version | Events | Block rate | Denials converted into a delegation |
+|---|---|---|---|
+| ≤ 0.3.0 | 589 | 26% | 0% |
+| 0.4.0 | 1,238 | 5% | 0% |
+| 0.5.0 | 45 | 48% | 71% |
+
+The 0.4.0 row looks like a plugin at rest, and for a while it was read that way. Measuring
+coverage instead of denials showed otherwise: 29 files had 60% or more of their content in the
+context, several at 100%, assembled from small reads. Nine were above the threshold, 2,150 lines
+that should have been stopped, and 13,603 of the 17,281 lines that entered came through the
+always-free band. That is what 0.5.0 repaired, and why conversion is the row that matters: it
+counts denials that turned into a delegation rather than into a shrug.
+**A one-off replay, kept for reference.** Tool calls from 105 recorded Claude Code
 sessions were reprocessed through the parser and the decision logic, with the threshold set to
 100 lines:
 
@@ -102,37 +99,6 @@ do not.**
 
 Latency is the real cost: tens of seconds per delegation. Smaller models answer faster and lose
 precision on line numbers.
-
-**What 0.3.0 fixed.** Two days of real logs showed the plugin was working as a brake and never
-as a detour. Of 50 denials, 48 led to better behavior, but Claude never once delegated. Worse,
-the always-free editing window was a hole: 13,603 of the 17,281 lines that reached the context
-came through it, 80 lines at a time. Counting the window from the second read onward closes it:
-
-| File | Before | After |
-|---|---|---|
-| A 4,141-line shell script | 2,318 lines entered, 56% of the file | 337 lines, 8% |
-| A 3,173-line shell script | 2,046 lines entered, 64% of the file | 341 lines, 11% |
-
-Across the whole log the block rate went from 27% to 32%, and blocked tokens from roughly 78
-thousand to 91 thousand.
-
-**What 0.5.0 fixed.** Three days of work across three projects, with the exempt bands in place,
-produced a 2% block rate and no delegations at all. Reconstructing the real ranges from session
-transcripts showed why: 29 files had 60% or more of their content in the context, several at
-100%, assembled from small reads. Nine of them were above the threshold, 2,150 lines that should
-have been stopped.
-
-The cause was the design, not evasion. The exempt tier of 25 lines was unlimited and never
-charged to anything, and it absorbed 41% of all reads. The session-start hook published the
-exempt sizes, so the cheapest path was also the documented one.
-
-0.5.0 removes every exempt band. The threshold became a per-file budget, the escape allowance is
-measured in lines, and the routing text no longer names a single limit:
-
-| Metric | 0.4.0 | 0.5.0 |
-|---|---|---|
-| Block rate | 5% | 48% |
-| Denials converted into a delegation | 0% | 71% |
 
 **How to check this yourself.** Every log line carries the plugin version, the ranges it asked
 for and the coverage reached so far, and `shunt-stats` turns that into a version comparison and
@@ -186,6 +152,25 @@ The session-start hook states the rule without publishing the numbers. The earli
 listed the exempt sizes, and the log showed the result: 41% of reads landed exactly inside the
 exempt band, and files above the threshold reached the context whole, assembled from slices. A
 published limit is a map of the way around it.
+
+### Why the rules look like this
+
+The rules above are not precautions, they are repairs. The first version was a
+faithful port, with a regex over the command line, and in real usage logs it fired
+**exactly once across two sessions**. That single block was worked around: the model
+reread the same file in four slices with `sed -n`. It read everything, spent the same
+tokens, and the local model was never called.
+
+Almost no read passed through where the hooks were watching:
+
+- `cd project && cat AGENTS.md` did not match the `^cat ` regex
+- `cat file 2>/dev/null` was discarded by the redirection filter
+- `sed -n`, `awk`, and `head -150` inside a loop went unrecognized
+- `Read` with `limit: 620` on a 1200-line file passed, because the rule was "it has an `offset`
+  or a `limit`, so it must be a targeted read"
+- reads issued by other tools, such as third-party MCP servers, fell outside the matcher
+
+That is what the lexical parser is for. Each of those five shapes is a test case.
 
 ### What the parser recognizes
 
@@ -311,9 +296,10 @@ instead of guessing from timestamps:
 Comparação por versão
   versão      eventos  negativas    entrou  bloqueado   taxa  delegações  conversão
   <=0.3.0         589         50     17949       6297    26%        0+9!         0%
-  0.4.0            42          8      1120       2240    67%           4        50%
+  0.4.0          1238          5     23977       1324     5%           4         0%
+  0.5.0            45          7      1457       1366    48%           1        71%
 
-  <=0.3.0 -> 0.4.0: taxa de bloqueio 26% -> 67%, conversão 0% -> 50%
+  0.4.0 -> 0.5.0: taxa de bloqueio 5% -> 48%, conversão 0% -> 71%
 ```
 
 `delegações` counts successful `bulk-read` runs, with `+N!` marking failures. `conversão` is the
@@ -419,6 +405,8 @@ Code comments and inline documentation are in Brazilian Portuguese.
   `keep_alive`, TSV logging, and `shunt-stats`.
 - **0.1.0** — initial port: the original hooks with the transport swapped for Ollama.
 
+Each entry above was written after measuring the previous one against real logs.
+`scripts/shunt-stats` is what makes that possible.
 ## License
 
 Apache 2.0, the same as Spotify's original repository. See [LICENSE](LICENSE) and

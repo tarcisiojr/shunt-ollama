@@ -48,27 +48,24 @@ o conceito de "mode" como arquivo de system prompt, e o formato de mensagem em t
 A última linha importa: versões recentes do Claude Code rejeitam o formato antigo com
 `Hook JSON output validation failed`, e um hook que falha na validação **não bloqueia nada**.
 
-## Por que a versão 0.2.0 existe
-
-A 0.1.0 era um port fiel, com os hooks originais quase intactos. Nos logs de uso real ela
-disparou **uma única vez em duas sessões**, e esse único bloqueio foi contornado: o modelo
-releu o mesmo arquivo em quatro fatias com `sed -n '30,120p'`, `'121,200p'`, `'201,276p'`.
-Leu tudo, gastou os mesmos tokens, e o modelo local nunca foi chamado.
-
-A investigação mostrou que quase nenhuma leitura passava por onde os hooks vigiavam:
-
-- `cd projeto && cat AGENTS.md` não casava com a regex `^cat `
-- `cat arquivo 2>/dev/null` era descartado pelo filtro de redirecionamento
-- `sed -n`, `awk` e `head -150` em loop não eram reconhecidos
-- `Read` com `limit: 620` num arquivo de 1200 linhas passava, porque a regra era
-  "tem `offset` ou `limit`, então é leitura direcionada"
-- leituras feitas por outras ferramentas (MCP de terceiros) ficavam fora do matcher
-
-A 0.2.0 reescreve os hooks em Python para fechar essas passagens.
-
 ## Estatísticas
 
-**Replay dos hooks 0.2.0 sobre histórico real.** As chamadas de ferramenta de 105 sessões
+**Efeito de cada versão, direto do log.** É o que o `shunt-stats` imprime, e é a única tabela
+aqui que você consegue reproduzir no seu próprio uso:
+
+| Versão | Eventos | Taxa de bloqueio | Negativas convertidas em delegação |
+|---|---|---|---|
+| ≤ 0.3.0 | 589 | 26% | 0% |
+| 0.4.0 | 1.238 | 5% | 0% |
+| 0.5.0 | 45 | 48% | 71% |
+
+A linha da 0.4.0 parece um plugin em repouso, e por um tempo foi lida assim. Medir cobertura em
+vez de negativas mostrou o contrário: 29 arquivos tiveram 60% ou mais do conteúdo no contexto,
+vários a 100%, montados em leituras pequenas. Nove estavam acima do limiar, 2.150 linhas que
+deveriam ter sido barradas, e 13.603 das 17.281 linhas que entraram passaram pela faixa sempre
+livre. Foi isso que a 0.5.0 reparou, e é por isso que a conversão é a linha que importa: ela
+conta as negativas que viraram delegação em vez de desistência.
+**Um replay pontual, mantido como referência.** As chamadas de ferramenta de 105 sessões
 gravadas do Claude Code foram reprocessadas pelo parser e pela máquina de decisão, com o
 limiar em 100 linhas:
 
@@ -101,38 +98,6 @@ e devolver quase o volume original. **Perguntas específicas comprimem, pergunta
 
 Latência é o custo real: dezenas de segundos por delegação. Modelos menores respondem mais
 rápido com perda de precisão nos números de linha.
-
-**O que a 0.3.0 corrigiu.** Dois dias de log real mostraram o plugin funcionando como freio e
-nunca como desvio. Das 50 negativas, 48 levaram a comportamento melhor, mas o Claude não
-delegou uma única vez. Pior, a janela de edição sempre livre era um furo: 13.603 das 17.281
-linhas que chegaram ao contexto passaram por ela, 80 de cada vez. Contar a janela a partir da
-segunda leitura fecha isso:
-
-| Arquivo | Antes | Depois |
-|---|---|---|
-| Script shell de 4.141 linhas | 2.318 linhas entraram, 56% do arquivo | 337 linhas, 8% |
-| Script shell de 3.173 linhas | 2.046 linhas entraram, 64% do arquivo | 341 linhas, 11% |
-
-No log inteiro a taxa de bloqueio subiu de 27% para 32%, e os tokens bloqueados de cerca de 78
-mil para 91 mil.
-
-**O que a 0.5.0 corrigiu.** Três dias de trabalho em três projetos, com as faixas isentas em
-vigor, deram 2% de taxa de bloqueio e nenhuma delegação. Reconstruir as faixas reais a partir
-dos transcripts mostrou o porquê: 29 arquivos tiveram 60% ou mais do conteúdo no contexto,
-vários a 100%, montados em leituras pequenas. Nove deles estavam acima do limiar, 2.150 linhas
-que deveriam ter sido barradas.
-
-A causa era o desenho, não evasão. A faixa isenta de 25 linhas era ilimitada e nunca era
-debitada de nada, e absorveu 41% de todas as leituras. O hook de início de sessão publicava os
-tamanhos isentos, então o caminho mais barato era também o documentado.
-
-A 0.5.0 remove todas as faixas isentas. O limiar virou orçamento por arquivo, o saldo de escape
-é medido em linhas, e o texto de roteamento não cita mais nenhum limite:
-
-| Métrica | 0.4.0 | 0.5.0 |
-|---|---|---|
-| Taxa de bloqueio | 5% | 48% |
-| Negativas convertidas em delegação | 0% | 71% |
 
 **Como conferir isso você mesmo.** Cada linha do log carrega a versão do plugin, as faixas
 pedidas e a cobertura já alcançada, e o `shunt-stats` transforma isso numa comparação entre
@@ -190,6 +155,25 @@ O hook de início de sessão enuncia a regra sem publicar os números. A versão
 os tamanhos isentos, e o log mostrou o resultado: 41% das leituras couberam exatamente na faixa
 isenta, e arquivos acima do limiar chegaram ao contexto inteiros, montados em fatias. Um limite
 publicado é um mapa de contorno.
+
+### Por que as regras são assim
+
+As regras acima não são precauções, são reparos. A primeira versão era um port
+fiel, com uma regex sobre a linha de comando, e nos logs de uso real ela disparou
+**uma única vez em duas sessões**. Esse único bloqueio foi contornado: o modelo releu
+o mesmo arquivo em quatro fatias com `sed -n`. Leu tudo, gastou os mesmos tokens, e o
+modelo local nunca foi chamado.
+
+Quase nenhuma leitura passava por onde os hooks vigiavam:
+
+- `cd projeto && cat AGENTS.md` não casava com a regex `^cat `
+- `cat arquivo 2>/dev/null` era descartado pelo filtro de redirecionamento
+- `sed -n`, `awk` e `head -150` em loop não eram reconhecidos
+- `Read` com `limit: 620` num arquivo de 1200 linhas passava, porque a regra era
+  "tem `offset` ou `limit`, então é leitura direcionada"
+- leituras feitas por outras ferramentas (MCP de terceiros) ficavam fora do matcher
+
+É para isso que existe o parser léxico. Cada um desses cinco formatos é um caso de teste.
 
 ### O que o parser reconhece
 
@@ -315,9 +299,10 @@ em vez de adivinhar pelo timestamp:
 Comparação por versão
   versão      eventos  negativas    entrou  bloqueado   taxa  delegações  conversão
   <=0.3.0         589         50     17949       6297    26%        0+9!         0%
-  0.4.0            42          8      1120       2240    67%           4        50%
+  0.4.0          1238          5     23977       1324     5%           4         0%
+  0.5.0            45          7      1457       1366    48%           1        71%
 
-  <=0.3.0 -> 0.4.0: taxa de bloqueio 26% -> 67%, conversão 0% -> 50%
+  0.4.0 -> 0.5.0: taxa de bloqueio 5% -> 48%, conversão 0% -> 71%
 ```
 
 `delegações` conta as execuções bem-sucedidas do `bulk-read`, com `+N!` marcando as que
@@ -424,6 +409,8 @@ Os comentários e a documentação no código estão em português brasileiro.
   fatiamento automático, `keep_alive`, log TSV e `shunt-stats`.
 - **0.1.0** — port inicial: hooks do original com o transporte trocado para o Ollama.
 
+Cada entrada acima foi escrita depois de medir a anterior contra logs reais. É o
+`scripts/shunt-stats` que torna isso possível.
 ## Licença
 
 Apache 2.0, a mesma do repositório original da Spotify. Veja [LICENSE](LICENSE) e
