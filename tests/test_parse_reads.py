@@ -742,6 +742,116 @@ class ShellCalibrationTest(unittest.TestCase):
             self.assertTrue(json.load(fh)["models"]["gemma4:e4b"]["samples"])
 
 
+class PromptBudgetTest(unittest.TestCase):
+    """O Ollama descarta metade do contexto quando ele estoura, sem erro. As
+    partes têm de caber com folga, e o que não couber precisa ser detectado."""
+
+    def sh(self, body, **env_extra):
+        script = (f'. {os.path.join(ROOT, "scripts", "lib", "ollama.sh")}\n'
+                  + body)
+        env = {**os.environ}
+        for k in ("SHUNT_NUM_CTX", "SHUNT_PROMPT_FRACTION", "SHUNT_PROMPT_RESERVE",
+                  "SHUNT_BYTES_PER_TOKEN_FLOOR"):
+            env.pop(k, None)
+        env.update(env_extra)
+        out = subprocess.run(["bash", "-c", script], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout.strip()
+
+    def test_prompt_limit_stays_under_the_window(self):
+        """Medido: até ~27900 tokens passa, de ~30000 em diante corta."""
+        limite = int(self.sh("shunt_prompt_limit", SHUNT_NUM_CTX="32768"))
+        self.assertEqual(limite, 26214)
+        self.assertLess(limite, 27900)
+
+    def test_budget_uses_worst_case_ratio(self):
+        """Dimensionar pelo caso médio estoura em JSON denso."""
+        orcamento = int(self.sh("shunt_chunk_budget", SHUNT_NUM_CTX="32768"))
+        # a 1,6 bytes/token, o pior caso medido, cabe no limite
+        self.assertLessEqual(orcamento / 1.6, 26214)
+        # e não é tão pequeno a ponto de fatiar demais
+        self.assertGreater(orcamento, 30000)
+
+    def test_budget_follows_the_window(self):
+        pequeno = int(self.sh("shunt_chunk_budget", SHUNT_NUM_CTX="8192"))
+        grande = int(self.sh("shunt_chunk_budget", SHUNT_NUM_CTX="65536"))
+        self.assertLess(pequeno, grande)
+
+    def test_tiny_window_still_yields_a_budget(self):
+        self.assertGreater(int(self.sh("shunt_chunk_budget",
+                                       SHUNT_NUM_CTX="1024")), 0)
+
+    def test_tokens_for_bytes_overestimates(self):
+        """Superestimar tokens é o lado seguro: alonga o timeout."""
+        tokens = int(self.sh("shunt_tokens_for_bytes 16000"))
+        self.assertEqual(tokens, 10000)      # 16000 bytes a 1,6 b/token
+
+    def test_min_tokens_uses_the_other_end(self):
+        """Para acusar corte é preciso o mínimo plausível: usar o máximo
+        acusaria truncamento em todo arquivo de código."""
+        maximo = int(self.sh("shunt_tokens_for_bytes 17453"))
+        minimo = int(self.sh("shunt_min_tokens_for_bytes 17453"))
+        self.assertLess(minimo, maximo)
+        # um shell real de 17453 bytes rendeu 7060 tokens: entre os dois,
+        # e acima do gatilho de 70% do mínimo
+        self.assertLess(minimo * 0.7, 7060)
+        self.assertGreater(maximo, 7060)
+
+
+class TruncationDetectionTest(unittest.TestCase):
+    """Uma resposta sobre metade do conteúdo tem a mesma cara de uma resposta
+    completa: se o modelo não viu tudo, a resposta é descartada."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_invoke(self, pin, expected):
+        """Chama shunt_invoke contra um Ollama de mentira que relata `pin`."""
+        # Precisa se chamar `curl`: é o nome que o PATH intercepta.
+        fake = os.path.join(self.tmp.name, "curl")
+        with open(fake, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/bash\ncat >/dev/null\n"
+                     'printf \'{"message":{"content":"resposta"},'
+                     '"prompt_eval_count":%d,"eval_count":10,'
+                     '"total_duration":1000000000,"prompt_eval_duration":500000000}\''
+                     f" {pin}\n")
+        os.chmod(fake, 0o755)
+        sys_file = os.path.join(self.tmp.name, "sys.md")
+        msg_file = os.path.join(self.tmp.name, "msg.txt")
+        open(sys_file, "w", encoding="utf-8").write("system")
+        open(msg_file, "w", encoding="utf-8").write("x" * 1000)
+        script = (f'. {os.path.join(ROOT, "scripts", "lib", "ollama.sh")}\n'
+                  f'shunt_invoke {sys_file} {msg_file} {expected} 60')
+        # O PATH entra pelo ambiente do processo, não por atribuição dentro do
+        # script: o bash já teria resolvido `curl` pelo cache.
+        env = {**os.environ,
+               "PATH": self.tmp.name + os.pathsep + os.environ["PATH"],
+               "SHUNT_CALIBRATION": os.path.join(self.tmp.name, "c.json"),
+               "SHUNT_HOOK_LOG": os.path.join(self.tmp.name, "log")}
+        return subprocess.run(["bash", "-c", script], capture_output=True,
+                              text=True, env=env)
+
+    def test_full_prompt_is_accepted(self):
+        out = self.run_invoke(pin=9500, expected=10000)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("resposta", out.stdout)
+
+    def test_truncated_prompt_is_rejected(self):
+        out = self.run_invoke(pin=4000, expected=10000)
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("descartado em silêncio", out.stderr + out.stdout)
+        self.assertNotIn("resposta", out.stdout)
+
+    def test_no_expectation_skips_the_check(self):
+        """Chamadas sem tamanho esperado não podem quebrar."""
+        out = self.run_invoke(pin=10, expected=0)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+
 class SessionStartTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

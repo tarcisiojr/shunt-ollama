@@ -50,7 +50,7 @@ done
 src_files=()   # arquivo real a ler
 src_labels=()  # rótulo que vai na tag
 cmd_out=""; stdin_out=""; numbered=""  # preenchidos por shunt_tmpfile (printf -v)
-chunk_tokens=0; chunk_timeout=0
+chunk_tokens=0; chunk_timeout=0; chunk_bytes=0; chunk_floor=0
 
 add_source() {
   local file="$1" label="$2"
@@ -103,10 +103,10 @@ if [ ${#src_files[@]} -eq 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Orçamento e fatiamento. ~4 chars/token; reserva para system prompt e resposta.
+# Orçamento e fatiamento, dimensionados para o teto real do prompt e pelo
+# pior caso de bytes por token: ver shunt_chunk_budget.
 # ---------------------------------------------------------------------------
-budget_chars=$(( (SHUNT_NUM_CTX * 80 / 100 - 2000) * 4 ))
-[ "$budget_chars" -lt 20000 ] && budget_chars=20000
+budget_chars="$(shunt_chunk_budget)"
 
 chunks=()        # arquivos de mensagem prontos
 chunk_labels=()  # descrição de cada parte
@@ -171,9 +171,14 @@ for i in "${!chunks[@]}"; do
   if [ "$n" -gt 1 ]; then
     printf -- '- Parte %d/%d (%s):\n' "$((i + 1))" "$n" "${chunk_labels[$i]}"
   fi
-  chunk_tokens=$(( $(wc -c < "${chunks[$i]}") / 4 ))
+  chunk_bytes="$(wc -c < "${chunks[$i]}" | tr -d ' ')"
+  # Duas contas com propósitos opostos: o máximo dimensiona o timeout, o
+  # mínimo serve de piso para acusar truncamento sem falso positivo.
+  chunk_tokens="$(shunt_tokens_for_bytes "$chunk_bytes")"
+  chunk_floor="$(shunt_min_tokens_for_bytes "$chunk_bytes")"
   chunk_timeout="$(shunt_timeout_for "$chunk_tokens")"
-  shunt_invoke "$MODES_DIR/bulk-reader.md" "${chunks[$i]}" "$chunk_timeout" || exit 1
+  shunt_invoke "$MODES_DIR/bulk-reader.md" "${chunks[$i]}" \
+    "$chunk_floor" "$chunk_timeout" || exit 1
 done
 
 char_count=0

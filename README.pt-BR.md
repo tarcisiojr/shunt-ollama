@@ -105,7 +105,7 @@ pedidas e a cobertura já alcançada, e o `shunt-stats` transforma isso numa com
 versões e num relatório de fatiamento. Os números acima saíram do próprio log, não da leitura
 de transcripts.
 
-**Suíte de testes.** 75 casos, montados a partir dos comandos exatos que versões anteriores
+**Suíte de testes.** 84 casos, montados a partir dos comandos exatos que versões anteriores
 deixaram passar.
 
 ## Como funciona
@@ -209,6 +209,23 @@ A conversão também deixou de ser palpite. Medida no tokenizador do Gemma, a ra
 token vai de 2,09 em JSON denso a 3,66 em Python gerado; a estimativa anterior de 4,0
 subestimava o custo em cerca de 30%, e em quase 90% justamente onde o risco é maior. A razão
 agora é aprendida pela mesma calibração que dimensiona o timeout.
+
+### O truncamento silencioso
+
+Medido com `num_ctx=32768`: um prompt de até cerca de 27.900 tokens é processado inteiro, e a
+partir de uns 30.000 o `prompt_eval_count` cai para exatamente 16.387, que é `num_ctx/2`. Quando
+o contexto estoura, o llama.cpp descarta metade dele, e nada disso gera erro. O modelo responde
+sobre o que sobrou, com a mesma confiança de sempre.
+
+É por isso que o fatiamento mira `SHUNT_PROMPT_FRACTION` (80%) da janela em vez da janela toda, e
+por isso o orçamento de bytes assume o pior caso de bytes por token, e não o caso médio. A razão
+varia quase 2,5 vezes entre JSON denso e código; uma parte dimensionada para código estoura em
+JSON, enquanto uma dimensionada para JSON apenas custa uma parte a mais no código. Medido num
+script shell de 190 KB, a diferença foi de cinco partes em vez de quatro.
+
+Cada chamada também compara os tokens que esperava enviar com o que o Ollama relata ter
+processado. Se faltar, o conteúdo foi cortado, e a resposta é **rejeitada** em vez de devolvida:
+uma resposta parcial com aparência de completa é pior que nenhuma.
 
 ### Adaptação à máquina
 
@@ -357,8 +374,16 @@ errar alguns números de linha, então confira valores exatos antes de um `Edit`
 | `SHUNT_MAX_TOTAL_BYTES` | `3 × MIN_BYTES` | soma de vários arquivos num só comando |
 | `SHUNT_WARN_RATIO` | `50` | avisa quando a resposta passa desta fração do conteúdo lido |
 | `SHUNT_TIMEOUT_SECONDS` | vazio | timeout fixo em segundos; sobrepõe o calculado |
-| `SHUNT_TIMEOUT_SLACK` | `200` | % do tempo previsto admitido antes de desistir |
-| `SHUNT_TIMEOUT_MIN` / `_MAX` | `60` / `600` | piso e teto do timeout calculado |
+| `SHUNT_TIMEOUT_SLACK` | `300` | % do tempo previsto admitido antes de desistir |
+| `SHUNT_TIMEOUT_MIN` | `60` | piso do timeout calculado |
+| `SHUNT_TIMEOUT_MAX` | `600` | teto do timeout calculado |
+| `SHUNT_PROMPT_FRACTION` | `80` | % do `NUM_CTX` que um prompt pode usar antes de o Ollama descartar |
+| `SHUNT_PROMPT_RESERVE` | `900` | tokens reservados ao system prompt e ao template de chat |
+| `SHUNT_BYTES_PER_TOKEN_FLOOR` | `16` | décimos de byte por token, pior caso, usado para dimensionar as partes |
+| `SHUNT_BYTES_PER_TOKEN_CEIL` | `40` | o outro extremo da mesma razão, usado para detectar truncamento |
+| `SHUNT_CALIBRATION_SAMPLES` | `20` | medições guardadas por modelo |
+| `SHUNT_CALIBRATION_MIN_TOKENS` | `500` | chamadas menores medem ruído e são ignoradas |
+| `SHUNT_EDIT_WINDOW` | vazio | legado: convertido a 36 bytes por linha quando `SHUNT_EDIT_BYTES` falta |
 | `SHUNT_CALIBRATION` | `~/.claude/shunt-calibration.json` | velocidade aprendida, por modelo |
 | `SHUNT_FALLBACK_RATE` | `40` | tokens/s assumidos antes da primeira medição |
 | `SHUNT_HOOK_LOG` | `~/.claude/shunt.log` | log TSV de decisões |
@@ -494,6 +519,12 @@ também o idioma do texto de roteamento que os hooks injetam.
 
 ## Changelog
 
+- **0.10.0** — corrige um truncamento silencioso. O Ollama descarta metade do contexto quando um
+  prompt estoura, sem erro algum, e as partes eram dimensionadas em 80% do `num_ctx` assumindo
+  4 bytes por token, o que caía logo acima do teto real. Delegações grandes vinham respondendo
+  sobre parte do arquivo. As partes passam a ser dimensionadas contra o teto medido e o pior
+  caso de bytes por token, e cada chamada compara os tokens enviados com o que o Ollama relata
+  ter processado, rejeitando a resposta quando divergem.
 - **0.9.0** — a unidade de decisão passou de linha para byte. Linha não é proxy de custo: um
   JSON de uma linha com 131 mil tokens passava intocado. A troca protegeu 438 arquivos que somam
   1,67 milhão de tokens e liberou 219 que eram bloqueados por ter linhas curtas. A razão de

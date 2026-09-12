@@ -9,10 +9,32 @@
 OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
 SHUNT_MODEL="${SHUNT_MODEL:-gemma4:e4b}"
 SHUNT_TEMPERATURE="${SHUNT_TEMPERATURE:-0.2}"
-# Janela de contexto: gemma4 aceita bem mais, mas o Ollama sobe com 4096 por
-# padrão. 32768 cobre um arquivo de ~4000 linhas com folga. Ajuste conforme
-# a RAM/VRAM da sua máquina. O bulk-read fatia o que não couber.
+# Janela de contexto do modelo. O Ollama sobe com 4096 se você não pedir
+# outro valor, e aí um arquivo grande é cortado sem aviso.
+#
+# ATENÇÃO, medido neste plugin com num_ctx=32768: um prompt de até ~27900
+# tokens é processado inteiro, e a partir de ~30000 o prompt_eval_count cai
+# para exatamente 16387, ou seja num_ctx/2. O llama.cpp descarta metade do
+# contexto quando ele estoura, e nada nisso vira erro: o modelo responde
+# sobre o pedaço que sobrou, com a mesma confiança. Por isso o orçamento fica
+# abaixo do teto e uma resposta truncada é detectada e descartada.
 SHUNT_NUM_CTX="${SHUNT_NUM_CTX:-32768}"
+# Fração do num_ctx usável pelo prompt com folga. O teto medido fica em torno
+# de 85%; 80% deixa margem para a variação da razão bytes/token.
+SHUNT_PROMPT_FRACTION="${SHUNT_PROMPT_FRACTION:-80}"
+# Tokens reservados para o system prompt do mode e para o template de chat.
+SHUNT_PROMPT_RESERVE="${SHUNT_PROMPT_RESERVE:-900}"
+# Bytes por token, em décimos, no pior caso plausível. Medido no tokenizador
+# do gemma: 1,6 em JSONL denso, 2,1 em JSON minificado, 2,7 a 3,7 em código e
+# prosa. As partes são dimensionadas pelo piso de propósito. Estourar o limite
+# significa truncar em silêncio; subestimar só gera uma parte a mais, e a
+# diferença medida foi de uma parte em cinco num script de 190 KB.
+SHUNT_BYTES_PER_TOKEN_FLOOR="${SHUNT_BYTES_PER_TOKEN_FLOOR:-16}"  # décimos
+# E o teto da mesma razão. Serve ao outro lado da conta: para saber se o
+# prompt foi cortado é preciso o MÍNIMO de tokens que ele poderia ter, e usar
+# o piso ali acusaria truncamento em todo arquivo de código.
+SHUNT_BYTES_PER_TOKEN_CEIL="${SHUNT_BYTES_PER_TOKEN_CEIL:-40}"  # décimos
+
 # Mantém o modelo carregado entre chamadas; sem isso cada delegação paga o
 # cold start de vários segundos.
 SHUNT_KEEP_ALIVE="${SHUNT_KEEP_ALIVE:-30m}"
@@ -37,7 +59,7 @@ SHUNT_CALIBRATION_MIN_TOKENS="${SHUNT_CALIBRATION_MIN_TOKENS:-500}"
 # antes de um prompt novo e lento.
 SHUNT_MAX_PLAUSIBLE_RATE="${SHUNT_MAX_PLAUSIBLE_RATE:-3000}"
 # Folga sobre o tempo previsto, e piso/teto do timeout calculado.
-SHUNT_TIMEOUT_SLACK="${SHUNT_TIMEOUT_SLACK:-200}"
+SHUNT_TIMEOUT_SLACK="${SHUNT_TIMEOUT_SLACK:-300}"
 SHUNT_TIMEOUT_MIN="${SHUNT_TIMEOUT_MIN:-60}"
 # Teto: sem histórico a taxa assumida é bem baixa, e sem um teto a primeira
 # chamada de uma parte grande esperaria vinte minutos por um Ollama travado.
@@ -101,6 +123,46 @@ shunt_log_line() {
     "$(date +%Y-%m-%dT%H:%M:%S)" \
     "$tool" "$decision" "$reason" "$path" "$total" "$eff" "$SHUNT_VERSION" \
     >> "$SHUNT_HOOK_LOG" 2>/dev/null
+}
+
+# Tokens que o Ollama aceita de prompt, na prática.
+shunt_prompt_limit() {
+  printf '%s' $(( SHUNT_NUM_CTX * SHUNT_PROMPT_FRACTION / 100 ))
+}
+
+# Razão bytes/token, em décimos, aprendida nas chamadas já feitas com este
+# modelo. Mistura tipos de conteúdo, então não serve para dimensionar partes;
+# serve para relatar e para estimar custo na mensagem de bloqueio.
+shunt_learned_ratio() {
+  local v
+  [ -r "$SHUNT_CALIBRATION" ] || { printf '0'; return; }
+  v=$(jq -r --arg m "$SHUNT_MODEL" '
+        (.models[$m].samples // [])
+        | map(select(.tokens > 0 and (.bytes // 0) > 0) | .bytes / .tokens * 10)
+        | sort | if length == 0 then 0 else .[length / 2 | floor] end | floor
+      ' "$SHUNT_CALIBRATION" 2>/dev/null) || v=0
+  printf '%s' "${v:-0}"
+}
+
+# Bytes de conteúdo por parte, para que o prompt montado caiba no limite real.
+shunt_chunk_budget() {
+  local tokens bytes
+  tokens=$(( $(shunt_prompt_limit) - SHUNT_PROMPT_RESERVE ))
+  [ "$tokens" -lt 500 ] && tokens=500
+  bytes=$(( tokens * SHUNT_BYTES_PER_TOKEN_FLOOR / 10 ))
+  printf '%s' "$bytes"
+}
+
+# Tokens que um trecho deve ocupar, no máximo. Pelo piso da razão, então
+# superestima em código, que é o lado seguro para dimensionar o timeout.
+shunt_tokens_for_bytes() {
+  printf '%s' $(( $1 * 10 / SHUNT_BYTES_PER_TOKEN_FLOOR ))
+}
+
+# E no mínimo. Pelo teto da razão, que é o lado seguro para acusar corte: só
+# dispara quando o Ollama processou menos do que qualquer conteúdo renderia.
+shunt_min_tokens_for_bytes() {
+  printf '%s' $(( $1 * 10 / SHUNT_BYTES_PER_TOKEN_CEIL ))
 }
 
 # Taxa de processamento aprendida para este modelo, em tokens/s.
@@ -175,12 +237,13 @@ shunt_record_sample() {
 # Uma rodada de chat, sem histórico, contra o modelo local.
 #   $1 arquivo com o system prompt (o "mode")
 #   $2 arquivo com a mensagem do usuário
-#   $3 timeout em segundos (opcional; padrão vem da calibração)
+#   $3 tokens esperados no prompt, para detectar truncamento (0 = não checar)
+#   $4 timeout em segundos (opcional; padrão vem da calibração)
 shunt_invoke() {
-  local system_file="$1" message_file="$2" timeout="$3"
+  local system_file="$1" message_file="$2" expected="${3:-0}" timeout="$4"
   local payload response text rc err
   if [ -z "$timeout" ]; then
-    timeout="$(shunt_timeout_for "$(( $(wc -c < "$message_file") / 4 ))")"
+    timeout="$(shunt_timeout_for "$expected")"
   fi
 
   payload=$(jq -n \
@@ -252,9 +315,13 @@ shunt_invoke() {
   SHUNT_POUT_TOTAL=$((SHUNT_POUT_TOTAL + pout))
   SHUNT_DUR_TOTAL=$((SHUNT_DUR_TOTAL + dur))
   echo "[shunt: $pin tokens entrada | $pout saída | ${dur}s | $SHUNT_MODEL]" >&2
-  # O Ollama trunca em silêncio quando o prompt encosta em num_ctx.
-  if [ "$pin" -ge $((SHUNT_NUM_CTX - 256)) ]; then
-    echo "[shunt: AVISO — prompt ocupou $pin de $SHUNT_NUM_CTX tokens; parte do arquivo pode ter sido truncada. Aumente SHUNT_NUM_CTX.]" >&2
+  # Truncamento silencioso: o prompt enviado tinha um tamanho conhecido, e o
+  # Ollama relatou ter processado muito menos. A resposta cobriria só parte do
+  # conteúdo, com a mesma confiança de sempre, então é descartada.
+  if [ "$expected" -gt 0 ] && [ "$pin" -lt $(( expected * 70 / 100 )) ]; then
+    echo "Error: o Ollama processou $pin tokens de um prompt de ~$expected; o resto foi descartado em silêncio (context shift do llama.cpp em num_ctx/2). A resposta cobriria só parte do conteúdo e foi rejeitada. Aumente SHUNT_NUM_CTX se houver RAM/VRAM, ou baixe SHUNT_PROMPT_FRACTION para gerar partes menores." >&2
+    shunt_log_line bulk-read error "truncated;pin=$pin;expected=$expected"
+    return 1
   fi
 
   printf '%s\n' "$text"
