@@ -22,15 +22,15 @@ plugin está desviando a leitura; conversão baixa significa que ele só está f
 está desistindo da informação em vez de delegar. Taxa de bloqueio alta com conversão zero é o
 pior cenário, não o melhor.
 
-**Cobertura por arquivo e sessão.** Quanto de cada arquivo chegou ao contexto. A coluna
-`fatias` conta leituras de até 80 linhas. Um arquivo grande com cobertura alta montada quase
-toda em fatias indica leitura em volta do orçamento, e a seção de fatiamento lista esses casos
-explicitamente.
+**Cobertura por arquivo e sessão.** Quanto de cada arquivo chegou ao contexto, em bytes, que é
+a unidade do orçamento. A coluna `fatias` conta leituras pequenas. Um arquivo grande com
+cobertura alta montada quase toda em fatias indica leitura em volta do orçamento, e a seção de
+fatiamento lista esses casos explicitamente.
 
 **Decisões dos hooks.** O motivo de cada decisão. `small-file` é arquivo abaixo do limiar, fora
 de alcance. `counted` é leitura debitada do orçamento. `escape` é leitura de edição após o
-orçamento acabar. `heredoc` e `unresolved:$VAR` são comandos que o parser não consegue
-analisar, então são pontos cegos, não aprovações.
+orçamento acabar. `binary` é arquivo que não é texto, liberado. `heredoc` e `unresolved:$VAR`
+são comandos que o parser não consegue analisar, então são pontos cegos, não aprovações.
 
 **bulk-read.** Tokens que foram para o Ollama contra tokens devolvidos ao Claude, e a resposta
 como porcentagem do conteúdo lido. Acima de 50% a delegação rendeu pouco, e acima de 100% não

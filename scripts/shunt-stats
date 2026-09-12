@@ -21,29 +21,37 @@ import sys
 DEFAULT_LOG = os.environ.get("SHUNT_HOOK_LOG") or os.path.expanduser(
     "~/.claude/shunt.log")
 CONVERSION_WINDOW = dt.timedelta(minutes=10)
-TOKENS_PER_LINE = 12
+# Média medida no tokenizador do gemma sobre shell, Go, markdown e JSON.
+BYTES_PER_TOKEN = 3.0
 LEGACY_VERSION = "<=0.3.0"
 NOT_HOOK = ("bulk-read", "SessionStart")
 # Uma leitura desse tamanho ou menor conta como fatia, para separar
-# exploração em pedaços de leitura cirúrgica.
-SLICE_SIZE = 80
+# exploração em pedaços de leitura cirúrgica. Em bytes, como a decisão.
+SLICE_BYTES = 3000
+SLICE_LINES = 80
 
 
 def parse_line(line):
-    """Aceita 8 colunas (antes da versão), 9 (0.4.0) e 11 (0.5.0+)."""
+    """Aceita 8 colunas (antes da versão), 9 (0.4.0), 11 (0.5.0) e 13 (0.9.0).
+
+    A partir da 0.9.0 a decisão é em bytes e as colunas 12 e 13 os trazem;
+    antes disso só havia linhas, e as seções por byte ficam sem dado."""
     cols = line.rstrip("\n").split("\t")
-    if len(cols) not in (8, 9, 11):
+    if len(cols) not in (8, 9, 11, 13):
         return None
     try:
         ts = dt.datetime.fromisoformat(cols[0])
     except ValueError:
         return None
+    wide = len(cols) >= 11
     return {"ts": ts, "session": cols[1], "tool": cols[2], "decision": cols[3],
             "reason": cols[4], "path": cols[5], "total": int(cols[6] or 0),
             "eff": int(cols[7] or 0),
             "version": cols[8] if len(cols) >= 9 else LEGACY_VERSION,
-            "ranges": cols[9] if len(cols) == 11 else "-",
-            "covered": int(cols[10] or 0) if len(cols) == 11 else 0}
+            "ranges": cols[9] if wide else "-",
+            "covered": int(cols[10] or 0) if wide else 0,
+            "total_bytes": int(cols[11] or 0) if len(cols) == 13 else 0,
+            "read_bytes": int(cols[12] or 0) if len(cols) == 13 else 0}
 
 
 def kv(reason):
@@ -82,6 +90,9 @@ def summarize(rows):
         "events": len(hooks), "denies": len(denies),
         "entered": entered, "blocked": blocked,
         "rate": (100 * blocked / total) if total else 0.0,
+        "entered_bytes": sum(r["read_bytes"] for r in hooks
+                             if r["decision"] == "allow"),
+        "blocked_bytes": sum(r["read_bytes"] for r in denies),
         "delegations": len(bulk_ok), "delegation_errors": len(bulk) - len(bulk_ok),
         "converted": conversions(denies, bulk_ok),
         "sessions": len({r["session"] for r in hooks if r["session"] != "-"}),
@@ -100,7 +111,7 @@ def print_version_table(rows):
         by_version[r["version"]].append(r)
     versions = sorted(by_version, key=version_key)
 
-    print("Comparação por versão")
+    print("Comparação por versão (entrou/bloqueado em tokens estimados)")
     header = (f"  {'versão':<10} {'eventos':>8} {'negativas':>10} "
               f"{'entrou':>9} {'bloqueado':>10} {'taxa':>6} "
               f"{'delegações':>11} {'conversão':>10}")
@@ -112,8 +123,15 @@ def print_version_table(rows):
         deleg = str(s["delegations"])
         if s["delegation_errors"]:
             deleg += f"+{s['delegation_errors']}!"
+        # Antes da 0.9.0 o log só tinha linhas; ali a estimativa é por linha.
+        if s["entered_bytes"] or s["blocked_bytes"]:
+            entrou = int(s["entered_bytes"] / BYTES_PER_TOKEN)
+            bloqueado = int(s["blocked_bytes"] / BYTES_PER_TOKEN)
+        else:
+            entrou, bloqueado = s["entered"] * 12, s["blocked"] * 12
+        taxa = (100 * bloqueado / (entrou + bloqueado)) if entrou + bloqueado else 0
         print(f"  {v:<10} {s['events']:>8} {s['denies']:>10} "
-              f"{s['entered']:>9} {s['blocked']:>10} {s['rate']:>5.0f}% "
+              f"{entrou:>9} {bloqueado:>10} {taxa:>5.0f}% "
               f"{deleg:>11} {conv:>10}")
 
     if len(versions) > 1:
@@ -142,17 +160,22 @@ def coverage_rows(rows):
         key = (r["session"], r["path"])
         if r["decision"] == "allow":
             reads[key] += 1
-            if r["eff"] <= SLICE_SIZE:
+            fatia = (r["read_bytes"] <= SLICE_BYTES if r["read_bytes"]
+                     else r["eff"] <= SLICE_LINES)
+            if fatia:
                 slices[key] += 1
-            if r["covered"] > best.get(key, (0,))[0]:
-                best[key] = (r["covered"], r["total"], r["version"])
+            base = r["total_bytes"] or r["total"]
+            atual = r["covered"]
+            if atual > best.get(key, (0, 0))[0]:
+                best[key] = (atual, base, r["version"],
+                             bool(r["total_bytes"]))
     out = []
-    for key, (cov, total, ver) in best.items():
-        if cov:
+    for key, (cov, total, ver, em_bytes) in best.items():
+        if cov and total:
             out.append({"session": key[0], "path": key[1], "covered": cov,
                         "total": total, "pct": 100 * cov / total,
                         "reads": reads[key], "slices": slices[key],
-                        "version": ver})
+                        "version": ver, "bytes": em_bytes})
     return out
 
 
@@ -162,7 +185,10 @@ def print_coverage(rows, top):
         print("Cobertura por arquivo: sem dados. Linhas anteriores à 0.5.0 não\n"
               "registram faixas; use o log novo para esta seção.\n")
         return
-    print(f"Cobertura por arquivo e sessão (top {top} por percentual)")
+    em_bytes = sum(1 for r in cov if r["bytes"])
+    unidade = "bytes" if em_bytes >= len(cov) / 2 else "linhas"
+    print(f"Cobertura por arquivo e sessão, em {unidade} "
+          f"(top {top} por percentual)")
     print(f"  {'coberto':>8} {'total':>7} {'%':>5} {'leituras':>9} "
           f"{'fatias':>7}  arquivo")
     for r in sorted(cov, key=lambda x: (-x["pct"], -x["covered"]))[:top]:
@@ -175,14 +201,15 @@ def print_coverage(rows, top):
               if r["pct"] >= 50 and r["reads"] >= 3
               and r["slices"] >= r["reads"] - 1]
     print(f"\n  Fatiamento: {len(sliced)} arquivo(s) com 50%+ de cobertura "
-          f"montada em 3+ leituras de até {SLICE_SIZE} linhas")
+          f"montada em 3+ leituras pequenas")
     if sliced:
         for r in sorted(sliced, key=lambda x: -x["covered"])[:top]:
             name = os.path.basename(r["path"])
             print(f"    {r['covered']:>6} de {r['total']:<6} em "
                   f"{r['reads']:>2} leituras  {name}")
         print("    Se esses arquivos são grandes, o orçamento por arquivo está "
-              "frouxo:\n    considere baixar SHUNT_MIN_LINES ou SHUNT_ESCAPE_BUDGET.")
+              "frouxo:\n    considere baixar SHUNT_MIN_BYTES ou "
+              "SHUNT_ESCAPE_BYTES.")
     print()
 
 
@@ -238,9 +265,14 @@ def main():
         for path, n in collections.Counter(
                 r["path"] for r in denies).most_common(args.top):
             print(f"  {n:>5}  {path}")
-        print(f"\nLinhas que os denies impediram de entrar no contexto: "
-              f"{overall['blocked']} (~{overall['blocked'] * TOKENS_PER_LINE} "
-              f"tokens a {TOKENS_PER_LINE} tokens/linha)")
+        if overall["blocked_bytes"]:
+            tokens = int(overall["blocked_bytes"] / BYTES_PER_TOKEN)
+            print(f"\nBloqueado: {overall['blocked_bytes']} bytes "
+                  f"(~{tokens} tokens a {BYTES_PER_TOKEN} bytes/token), "
+                  f"em {overall['blocked']} linhas")
+        else:
+            print(f"\nLinhas que os denies impediram de entrar no contexto: "
+                  f"{overall['blocked']} (registro anterior à 0.9.0, sem bytes)")
 
     print(f"\nbulk-read: {overall['delegations']} delegação(ões) bem-sucedida(s)"
           + (f", {overall['delegation_errors']} com erro"

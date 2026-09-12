@@ -39,7 +39,7 @@ o conceito de "mode" como arquivo de system prompt, e o formato de mensagem em t
 |---|---|---|
 | Transporte | Portal CLI (`aika:invoke-chat`) | API HTTP local do Ollama |
 | Detecção em Bash | regex `^(cat\|head\|tail\|less\|more) ` | parser léxico (`shlex`) por segmento |
-| Limiar | tamanho do arquivo | **linhas efetivas** + acumulado por sessão |
+| Limiar | tamanho do arquivo | **bytes** do que a leitura traz, mais orçamento por sessão |
 | Payload | argumento de linha de comando (limitado por `ARG_MAX`) | stdin do `curl` |
 | Numeração | não | `cat -n` antes de enviar |
 | Fontes | arquivos | arquivos, diretórios, globs, saída de comando, stdin |
@@ -65,6 +65,7 @@ vários a 100%, montados em leituras pequenas. Nove estavam acima do limiar, 2.1
 deveriam ter sido barradas, e 13.603 das 17.281 linhas que entraram passaram pela faixa sempre
 livre. Foi isso que a 0.5.0 reparou, e é por isso que a conversão é a linha que importa: ela
 conta as negativas que viraram delegação em vez de desistência.
+
 **Um replay pontual, mantido como referência.** As chamadas de ferramenta de 105 sessões
 gravadas do Claude Code foram reprocessadas pelo parser e pela máquina de decisão, com o
 limiar em 100 linhas:
@@ -104,7 +105,7 @@ pedidas e a cobertura já alcançada, e o `shunt-stats` transforma isso numa com
 versões e num relatório de fatiamento. Os números acima saíram do próprio log, não da leitura
 de transcripts.
 
-**Suíte de testes.** 62 casos, montados a partir dos comandos exatos que versões anteriores
+**Suíte de testes.** 75 casos, montados a partir dos comandos exatos que versões anteriores
 deixaram passar.
 
 ## Como funciona
@@ -113,7 +114,7 @@ Três hooks, um script de delegação e um de métricas.
 
 | Peça | Papel |
 |---|---|
-| `hooks/check-file-size` | `PreToolUse` em `Read`. Calcula linhas efetivas: `min(limit, total - offset)`. |
+| `hooks/check-file-size` | `PreToolUse` em `Read`. Debita os bytes que as linhas pedidas realmente carregam. |
 | `hooks/check-bash-read` | `PreToolUse` em `Bash` e em ferramentas MCP que executam shell. Analisa `cat`, `head`, `tail`, `sed -n`, `awk`, `nl`, `bat`, `rtk read`. |
 | `hooks/session-start` | `SessionStart`. Injeta a regra de roteamento e registra se o Ollama está de pé. |
 | `scripts/bulk-read` | Monta a mensagem, chama o Ollama, imprime a resposta. |
@@ -126,31 +127,34 @@ bloqueio é tentar contornar.
 
 ### Regras de decisão
 
-Em `hooks/lib/shunt_common.py`. O limiar responde duas perguntas: pelo tamanho total do arquivo
-ele decide se o plugin se aplica, e quando se aplica, vira o orçamento de leitura daquele
-arquivo na sessão.
+Em `hooks/lib/shunt_common.py`. **A unidade é o byte, não a linha.** O limiar responde duas
+perguntas: pelo tamanho total do arquivo ele decide se o plugin se aplica, e quando se aplica,
+vira o orçamento de leitura daquele arquivo na sessão.
 
-1. Arquivo com até `SHUNT_MIN_LINES` (180) linhas está **fora de alcance**. Delegar custa mais
-   do que ler, então ele nunca entra em orçamento algum. Registrado como `small-file`.
-2. Acima disso, toda leitura do arquivo consome o orçamento. Não existe tamanho isento nem
-   primeira leitura livre. As faixas são guardadas por sessão como união de intervalos, então
-   reler a mesma faixa não faz o total crescer, e dividir a leitura em pedaços não compra mais
-   linhas.
-3. Esgotado o orçamento, restam `SHUNT_ESCAPE_BUDGET` (80) linhas extras em leituras de até
-   `SHUNT_EDIT_WINDOW` (80) linhas cada, para que editar o trecho apontado pelo modelo local
-   continue possível. Medido em linhas, e não em número de leituras: contar leituras permitia
-   três de 80, o que devolvia arquivos de 300 linhas inteiros.
-4. Vários arquivos num único comando acima de `SHUNT_MAX_TOTAL_LINES` (3× o limiar) também são
+1. Arquivo com até `SHUNT_MIN_BYTES` (6.480, cerca de 2.100 tokens) está **fora de alcance**.
+   Delegar custa mais do que ler, então ele nunca entra em orçamento algum. Registrado como
+   `small-file`.
+2. Acima disso, toda leitura do arquivo consome o orçamento, debitada pelos bytes que aquelas
+   linhas realmente carregam. Não existe tamanho isento nem primeira leitura livre. As faixas
+   são guardadas por sessão como união de intervalos, então reler a mesma faixa não faz o total
+   crescer, e dividir a leitura em pedaços não compra nada.
+3. Esgotado o orçamento, restam `SHUNT_ESCAPE_BYTES` (2.880) em leituras de até
+   `SHUNT_EDIT_BYTES` (2.880) cada, para que editar o trecho apontado pelo modelo local continue
+   possível. Medido em bytes, e não em número de leituras: contar leituras permitia três cheias,
+   o que devolvia arquivos pequenos inteiros.
+4. Vários arquivos num único comando acima de `SHUNT_MAX_TOTAL_BYTES` (3× o limiar) também são
    negados.
-5. Se o Ollama não responde, **nenhum bloqueio acontece**. A sondagem é cacheada por 2 minutos.
+5. Arquivo binário é liberado, registrado como `binary`. Contar quebras de linha em dados
+   binários produz números sem sentido, e não há como delegar imagem a um modelo de texto.
+6. Se o Ollama não responde, **nenhum bloqueio acontece**. A sondagem é cacheada por 2 minutos.
    Bloquear sem ter para onde delegar só travaria o Claude.
 
 O limiar tem piso de duas vezes a janela de edição, registrado como `threshold-floor` no início
-da sessão.
+da sessão. O `SHUNT_MIN_LINES` das versões anteriores continua sendo lido e convertido a 36
+bytes por linha, a mediana do corpus medido, então uma configuração existente segue valendo.
 
-A proteção é proporcionalmente mais fraca em arquivos pouco acima do limiar: um arquivo de 300
-linhas com orçamento 180 e escape 80 ainda pode chegar a 87% de cobertura. O ganho real está
-nos arquivos grandes, onde 260 linhas de 4.000 são 6%.
+A proteção é proporcionalmente mais fraca em arquivos pouco acima do limiar. O ganho real está
+nos arquivos grandes, onde o orçamento é uma fração pequena do total.
 
 O hook de início de sessão enuncia a regra sem publicar os números. A versão anterior listava
 os tamanhos isentos, e o log mostrou o resultado: 41% das leituras couberam exatamente na faixa
@@ -175,6 +179,36 @@ Quase nenhuma leitura passava por onde os hooks vigiavam:
 - leituras feitas por outras ferramentas (MCP de terceiros) ficavam fora do matcher
 
 É para isso que existe o parser léxico. Cada um desses cinco formatos é um caso de teste.
+
+### Por que bytes e não linhas
+
+Linha parecia um bom substituto para custo, e não é. Medido em 11.692 arquivos de três
+projetos, a razão de bytes por linha vai de 10 a 990. Entre o percentil 10 e o 90 ela varia
+apenas 2,6 vezes, o que explica por que a regra por linha parecia funcionar, e é na cauda que
+ela quebra.
+
+Comparando o limiar antigo de 180 linhas com um limiar equivalente em tokens nesses arquivos:
+
+| Resultado | Arquivos | Proporção |
+|---|---|---|
+| Concordam | 11.021 | 94,3% |
+| Passavam por linha, caros em tokens | 427 | 3,7% |
+
+Os 94% escondem o que importa. Os 427 arquivos que escapavam guardam 1,2 milhão de tokens, e o
+pior deles é um JSON de uma única linha com 131 mil tokens, mais da metade de uma janela de
+200 mil. A regra por linha nem olhava para ele.
+
+O erro é assimétrico. Bloquear um arquivo barato desperdiça uma rodada, cerca de 1.500 tokens.
+Deixar passar um denso pode desperdiçar a conversa. É uma razão de quase cem para um, e é ela
+que decide para que lado errar.
+
+A troca de unidade protegeu 438 arquivos que somam 1,67 milhão de tokens, e liberou 219 que
+estavam sendo bloqueados por ter muitas linhas curtas.
+
+A conversão também deixou de ser palpite. Medida no tokenizador do Gemma, a razão de bytes por
+token vai de 2,09 em JSON denso a 3,66 em Python gerado; a estimativa anterior de 4,0
+subestimava o custo em cerca de 30%, e em quase 90% justamente onde o risco é maior. A razão
+agora é aprendida pela mesma calibração que dimensiona o timeout.
 
 ### Adaptação à máquina
 
@@ -247,15 +281,15 @@ Copie `hooks/hooks.json` para a seção `hooks` do seu `settings.json`, trocando
 
 ### Ajustando o limiar
 
-O padrão é 250 linhas. Por causa do piso de duas vezes a janela de edição, valores abaixo de
-160 não têm efeito a menos que você reduza `SHUNT_EDIT_WINDOW` também. Para uso agressivo,
-baixe os dois. No `~/.claude/settings.json`:
+O padrão é 6.480 bytes, cerca de 2.100 tokens. Por causa do piso de duas vezes a janela de
+edição, valores abaixo disso não têm efeito a menos que você reduza `SHUNT_EDIT_BYTES` também.
+Para uso agressivo, baixe os dois. No `~/.claude/settings.json`:
 
 ```json
 {
   "env": {
-    "SHUNT_MIN_LINES": "160",
-    "SHUNT_EDIT_WINDOW": "60",
+    "SHUNT_MIN_BYTES": "4000",
+    "SHUNT_EDIT_BYTES": "1500",
     "SHUNT_MODEL": "gemma4:e4b",
     "SHUNT_NUM_CTX": "32768"
   }
@@ -263,8 +297,8 @@ baixe os dois. No `~/.claude/settings.json`:
 ```
 
 Limiar mais apertado bloqueia mais, e cada bloqueio custa uma delegação de dezenas de segundos
-ou uma informação que o Claude vai dispensar. Medido em logs reais, cair de 250 para 160 subiu
-a taxa de bloqueio de 32% para 41% e as negativas de 78 para 97.
+ou uma informação que o Claude vai dispensar. Use o `scripts/shunt-stats` para ver onde a sua
+configuração cai antes de apertá-la.
 
 ## Uso do bulk-read
 
@@ -316,10 +350,11 @@ errar alguns números de linha, então confira valores exatos antes de um `Edit`
 | `SHUNT_TEMPERATURE` | `0.2` | mesma do original |
 | `SHUNT_NUM_CTX` | `32768` | janela de contexto; o Ollama sobe com 4096 se você não setar, e aí trunca em silêncio |
 | `SHUNT_KEEP_ALIVE` | `30m` | mantém o modelo carregado entre chamadas |
-| `SHUNT_MIN_LINES` | `180` | tamanho fora de alcance e orçamento de leitura por arquivo, com piso de `2 × EDIT_WINDOW` |
-| `SHUNT_EDIT_WINDOW` | `80` | maior leitura de edição individual |
-| `SHUNT_ESCAPE_BUDGET` | `80` | linhas extras para leituras de edição após o orçamento acabar |
-| `SHUNT_MAX_TOTAL_LINES` | `3 × MIN_LINES` | soma de vários arquivos num só comando |
+| `SHUNT_MIN_BYTES` | `6480` | tamanho fora de alcance e orçamento por arquivo, com piso de `2 × EDIT_BYTES` |
+| `SHUNT_EDIT_BYTES` | `2880` | maior leitura de edição individual |
+| `SHUNT_ESCAPE_BYTES` | `2880` | bytes extras para leituras de edição após o orçamento acabar |
+| `SHUNT_MIN_LINES` | vazio | legado: convertido a 36 bytes por linha quando `SHUNT_MIN_BYTES` falta |
+| `SHUNT_MAX_TOTAL_BYTES` | `3 × MIN_BYTES` | soma de vários arquivos num só comando |
 | `SHUNT_WARN_RATIO` | `50` | avisa quando a resposta passa desta fração do conteúdo lido |
 | `SHUNT_TIMEOUT_SECONDS` | vazio | timeout fixo em segundos; sobrepõe o calculado |
 | `SHUNT_TIMEOUT_SLACK` | `200` | % do tempo previsto admitido antes de desistir |
@@ -378,7 +413,7 @@ a um caminho.
 O resto mostra decisões por ferramenta, arquivos mais bloqueados e tokens delegados ao Ollama
 contra tokens devolvidos ao Claude.
 
-O log é TSV com onze colunas:
+O log é TSV com treze colunas:
 
 | # | Coluna | Conteúdo |
 |---|---|---|
@@ -392,7 +427,9 @@ O log é TSV com onze colunas:
 | 8 | efetivo | linhas que entrariam no contexto |
 | 9 | versão | versão do plugin que tomou a decisão |
 | 10 | faixas | as faixas de linha que esta leitura pediu, ex. `1-80` ou `10-25,60-90` |
-| 11 | coberto | total de linhas do arquivo já lidas nesta sessão |
+| 11 | coberto | bytes do arquivo já lidos nesta sessão |
+| 12 | bytes totais | tamanho do arquivo inteiro |
+| 13 | bytes lidos | bytes que esta leitura traria |
 
 As colunas 10 e 11 existem para que diagnosticar fatiamento seja uma consulta ao log, e não uma
 reconstrução a partir dos transcripts das sessões. Linhas gravadas antes da 0.4.0 têm oito
@@ -402,11 +439,11 @@ versões aparecem no mesmo log: sessões já abertas seguem com os hooks antigos
 reiniciadas.
 
 Motivos: `small-file` (arquivo abaixo do limiar, fora de alcance), `counted` (debitada do
-orçamento), `escape` (debitada do saldo de escape depois de o orçamento acabar), `single-read`
-(negada por tamanho), `cumulative` (negada porque o orçamento acabou), `escape-exhausted`
-(negada porque o saldo de escape também acabou), `multi-file` (negada pela soma), `ollama-off`
-(liberada por falta do modelo), `threshold-floor` (o limiar configurado foi elevado ao piso),
-`heredoc` e `unresolved:$VAR` (não analisável).
+orçamento), `escape` (debitada do saldo de escape depois de o orçamento acabar), `binary` (não é
+texto, liberado), `single-read` (negada por tamanho), `cumulative` (negada porque o orçamento
+acabou), `escape-exhausted` (negada porque o saldo de escape também acabou), `multi-file`
+(negada pela soma), `ollama-off` (liberada por falta do modelo), `threshold-floor` (o limiar
+configurado foi elevado ao piso), `heredoc` e `unresolved:$VAR` (não analisável).
 
 Versões anteriores também gravavam `always-free`, `edit-window` e `window-counted`, das faixas
 isentas que a 0.5.0 removeu.
@@ -457,6 +494,11 @@ também o idioma do texto de roteamento que os hooks injetam.
 
 ## Changelog
 
+- **0.9.0** — a unidade de decisão passou de linha para byte. Linha não é proxy de custo: um
+  JSON de uma linha com 131 mil tokens passava intocado. A troca protegeu 438 arquivos que somam
+  1,67 milhão de tokens e liberou 219 que eram bloqueados por ter linhas curtas. A razão de
+  bytes por token passou a ser medida no tokenizador em uso em vez de assumida, arquivos
+  binários são liberados, e o log ganhou colunas de bytes.
 - **0.8.0** — o timeout passa a sair da velocidade medida na própria máquina em vez de uma
   constante: cada chamada registra tokens e tempo de parede por modelo, o percentil 20
   dimensiona o timeout e a mediana alimenta a estimativa da negativa. Amostras de prompt em

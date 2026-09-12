@@ -105,6 +105,7 @@ shunt_log_line() {
 
 # Taxa de processamento aprendida para este modelo, em tokens/s.
 #   $1 percentil (20 = conservador, para timeout; 50 = típico, para estimar)
+# As amostras trazem tokens, bytes e segundos de cada chamada real.
 # Sem histórico suficiente, devolve SHUNT_FALLBACK_RATE.
 shunt_rate() {
   local pct="${1:-20}"
@@ -141,7 +142,7 @@ shunt_timeout_for() {
 # gerar a resposta. E descarta taxas implausíveis, que denunciam prompt em
 # cache em vez de capacidade real da máquina.
 shunt_record_sample() {
-  local tokens="$1" nanos="$2" tmp implied
+  local tokens="$1" nanos="$2" bytes="${3:-0}" tmp implied
   [ "$tokens" -lt "$SHUNT_CALIBRATION_MIN_TOKENS" ] && return 0
   [ "$nanos" -le 0 ] && return 0
   implied=$(( tokens * 1000000000 / nanos ))
@@ -155,11 +156,13 @@ shunt_record_sample() {
   if jq --arg m "$SHUNT_MODEL" \
         --argjson t "$tokens" \
         --argjson ns "$nanos" \
+        --argjson b "$bytes" \
         --argjson keep "$SHUNT_CALIBRATION_SAMPLES" \
         --arg now "$(date +%Y-%m-%dT%H:%M:%S)" '
         .version = 1
         | .models[$m].samples = (((.models[$m].samples // [])
-            + [{tokens: $t, seconds: (($ns / 1000000000 * 1000 | round) / 1000)}])
+            + [{tokens: $t, bytes: $b,
+                seconds: (($ns / 1000000000 * 1000 | round) / 1000)}])
             | .[-$keep:])
         | .models[$m].updated = $now
       ' "$SHUNT_CALIBRATION" > "$tmp" 2>/dev/null; then
@@ -239,9 +242,12 @@ shunt_invoke() {
   pin=$(printf '%s' "$response" | jq -r '.prompt_eval_count // 0')
   pout=$(printf '%s' "$response" | jq -r '.eval_count // 0')
   dur=$(printf '%s' "$response" | jq -r '((.total_duration // 0) / 1000000000 | floor)')
-  local wall_nanos
+  local wall_nanos sent_bytes
   wall_nanos=$(printf '%s' "$response" | jq -r '.total_duration // 0')
-  shunt_record_sample "$pin" "$wall_nanos"
+  # Bytes enviados junto dos tokens contados: é o que permite medir a razão
+  # bytes/token deste tokenizador em vez de estimá-la.
+  sent_bytes=$(( $(wc -c < "$system_file") + $(wc -c < "$message_file") ))
+  shunt_record_sample "$pin" "$wall_nanos" "$sent_bytes"
   SHUNT_PIN_TOTAL=$((SHUNT_PIN_TOTAL + pin))
   SHUNT_POUT_TOTAL=$((SHUNT_POUT_TOTAL + pout))
   SHUNT_DUR_TOTAL=$((SHUNT_DUR_TOTAL + dur))

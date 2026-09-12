@@ -38,7 +38,9 @@ valores exatos antes de editar: o modelo local pode errar por algumas linhas.
 
 ## Limites
 
-Cada arquivo grande tem um orçamento de leitura por sessão, e dividir a leitura em pedaços não
-aumenta o total, porque as faixas são somadas. Para **localizar** um símbolo, use `grep -n` ou
-`rg`, que não consomem orçamento. Arquivos maiores que a janela do modelo são fatiados
-automaticamente, preservando a numeração original.
+Cada arquivo grande tem um orçamento de leitura por sessão, medido em bytes, e dividir a
+leitura em pedaços não aumenta o total, porque as faixas são somadas. O que conta é o tamanho, e
+não o número de linhas: um JSON minificado de uma linha pode custar mais contexto que um arquivo
+de mil linhas curtas. Para **localizar** um símbolo, use `grep -n` ou `rg`, que não consomem
+orçamento. Arquivos maiores que a janela do modelo são fatiados automaticamente, preservando a
+numeração original.

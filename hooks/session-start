@@ -5,10 +5,13 @@ Sem isso o modelo só descobre o shunt quando um deny acontece, e a reação
 natural a um bloqueio é tentar contornar.
 
 O texto descreve o caminho certo sem publicar os números que definem os
-limites. A versão anterior listava o tamanho das leituras que passavam livres,
-e a análise do log mostrou o resultado: 41% das leituras couberam exatamente
-na faixa isenta, e arquivos acima do limiar chegaram ao contexto inteiros,
-montados em fatias. Um limite publicado é um mapa de contorno.
+limites. Uma versão anterior listava o tamanho das leituras que passavam
+livres, e a análise do log mostrou o resultado: 41% das leituras couberam
+exatamente na faixa isenta, e arquivos acima do limiar chegaram ao contexto
+inteiros, montados em fatias. Um limite publicado é um mapa de contorno.
+
+Diz a unidade, no entanto: sem saber que o custo é em bytes, o modelo trata um
+JSON de uma linha como um arquivo pequeno.
 """
 
 import json
@@ -32,6 +35,9 @@ def routing_text(ollama_up: bool) -> str:
         "leitura é bloqueada.\n"
         "- O orçamento é do arquivo, não da leitura: dividir em pedaços não "
         "aumenta o que você consegue ler, porque as faixas são somadas.\n"
+        "- O que conta é o tamanho em bytes, não o número de linhas. Poucas "
+        "linhas densas, como um JSON minificado, custam mais contexto que "
+        "muitas linhas curtas.\n"
         "- Para entender, resumir ou responder perguntas sobre arquivo grande, "
         "diff grande ou vários arquivos, delegue ao modelo local:\n"
         f"    {sc.BULK_READ} --question \"<pergunta específica>\" --paths <arquivos>\n"
@@ -52,9 +58,9 @@ def main() -> None:
     with sc.State(session) as state:
         up = state.ollama_ok()
     sc.log(session, "SessionStart", "info", "ollama-up" if up else "ollama-down")
-    if sc.MIN_LINES_ADJUSTED:
+    if sc.MIN_BYTES_ADJUSTED:
         sc.log(session, "SessionStart", "info",
-               f"threshold-floor:{sc.MIN_LINES}")
+               f"threshold-floor:{sc.MIN_BYTES}")
     out = {"hookSpecificOutput": {"hookEventName": "SessionStart",
                                   "additionalContext": routing_text(up)}}
     print(json.dumps(out, ensure_ascii=False))

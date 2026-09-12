@@ -39,7 +39,7 @@ the notion of a "mode" as a system-prompt file, and the message format built fro
 |---|---|---|
 | Transport | Portal CLI (`aika:invoke-chat`) | Ollama's local HTTP API |
 | Bash detection | regex `^(cat\|head\|tail\|less\|more) ` | lexical parser (`shlex`), segment by segment |
-| Threshold | file size | **effective lines** plus a per-session running total |
+| Threshold | file size | **bytes** of what the read brings, plus a per-session budget |
 | Payload | command-line argument, capped by `ARG_MAX` | `curl` stdin |
 | Line numbering | no | `cat -n` before sending |
 | Sources | files | files, directories, globs, command output, stdin |
@@ -65,6 +65,7 @@ context, several at 100%, assembled from small reads. Nine were above the thresh
 that should have been stopped, and 13,603 of the 17,281 lines that entered came through the
 always-free band. That is what 0.5.0 repaired, and why conversion is the row that matters: it
 counts denials that turned into a delegation rather than into a shrug.
+
 **A one-off replay, kept for reference.** Tool calls from 105 recorded Claude Code
 sessions were reprocessed through the parser and the decision logic, with the threshold set to
 100 lines:
@@ -104,7 +105,7 @@ precision on line numbers.
 for and the coverage reached so far, and `shunt-stats` turns that into a version comparison and
 a slicing report. The numbers above came from the log itself, not from reading transcripts.
 
-**Test suite.** 62 cases, built from the exact commands that earlier versions let through.
+**Test suite.** 75 cases, built from the exact commands that earlier versions let through.
 
 ## How it works
 
@@ -112,7 +113,7 @@ Three hooks, one delegation script, one metrics script.
 
 | Piece | Role |
 |---|---|
-| `hooks/check-file-size` | `PreToolUse` on `Read`. Computes effective lines: `min(limit, total - offset)`. |
+| `hooks/check-file-size` | `PreToolUse` on `Read`. Charges the bytes the requested lines actually carry. |
 | `hooks/check-bash-read` | `PreToolUse` on `Bash` and on MCP tools that execute shell. Parses `cat`, `head`, `tail`, `sed -n`, `awk`, `nl`, `bat`, `rtk read`. |
 | `hooks/session-start` | `SessionStart`. Injects the routing rule and records whether Ollama is up. |
 | `scripts/bulk-read` | Builds the message, calls Ollama, prints the answer. |
@@ -125,29 +126,33 @@ block is to try to route around it.
 
 ### Decision rules
 
-In `hooks/lib/shunt_common.py`. The threshold answers two questions: by total file size it
-decides whether the plugin applies at all, and when it does, it becomes that file's reading
-budget for the session.
+In `hooks/lib/shunt_common.py`. **The unit is the byte, not the line.** The threshold answers
+two questions: by total file size it decides whether the plugin applies at all, and when it
+does, it becomes that file's reading budget for the session.
 
-1. A file of up to `SHUNT_MIN_LINES` (180) lines is **out of scope**. Delegating costs more than
-   reading it, so it never enters a budget. Logged as `small-file`.
-2. Above that, every read of the file consumes the budget. There is no exempt size and no free
-   first read. The ranges are stored per session as a union of intervals, so rereading the same
-   range does not grow the total, and splitting a read into pieces does not buy more lines.
-3. Once the budget is spent, `SHUNT_ESCAPE_BUDGET` (80) extra lines remain available in reads of
-   up to `SHUNT_EDIT_WINDOW` (80) lines each, so editing a slice the local model pointed at
-   stays possible. Measured in lines rather than in number of reads: counting reads allowed
-   three of 80, which handed back 300-line files whole.
-4. Several files in a single command above `SHUNT_MAX_TOTAL_LINES` (3× the threshold) are denied
+1. A file of up to `SHUNT_MIN_BYTES` (6,480, about 2,100 tokens) is **out of scope**. Delegating
+   costs more than reading it, so it never enters a budget. Logged as `small-file`.
+2. Above that, every read of the file consumes the budget, charged by the bytes those lines
+   actually carry. There is no exempt size and no free first read. Ranges are stored per session
+   as a union of intervals, so rereading the same range does not grow the total, and splitting a
+   read into pieces buys nothing.
+3. Once the budget is spent, `SHUNT_ESCAPE_BYTES` (2,880) remain available in reads of up to
+   `SHUNT_EDIT_BYTES` (2,880) each, so editing a slice the local model pointed at stays
+   possible. Measured in bytes rather than in number of reads: counting reads allowed three full
+   ones, which handed small files back whole.
+4. Several files in a single command above `SHUNT_MAX_TOTAL_BYTES` (3× the threshold) are denied
    as well.
-5. If Ollama does not answer, **nothing is blocked**. The probe is cached for two minutes.
+5. A binary file is left alone, logged as `binary`. Counting newlines in binary data produces
+   meaningless numbers, and there is no way to delegate an image to a text model anyway.
+6. If Ollama does not answer, **nothing is blocked**. The probe is cached for two minutes.
    Blocking with nowhere to delegate would only stall Claude.
 
 The threshold is floored at twice the edit window, logged as `threshold-floor` at session start.
+`SHUNT_MIN_LINES` from earlier versions is still read and converted at 36 bytes per line, the
+median of the measured corpus, so an existing configuration keeps working.
 
-Protection is weaker in proportion for files just above the threshold: a 300-line file with a
-budget of 180 and an escape of 80 can still reach 87% coverage. The real gain is on large files,
-where 260 lines out of 4,000 is 6%.
+Protection is weaker in proportion for files just above the threshold. The real gain is on large
+files, where the budget is a small fraction of the whole.
 
 The session-start hook states the rule without publishing the numbers. The earlier version
 listed the exempt sizes, and the log showed the result: 41% of reads landed exactly inside the
@@ -172,6 +177,36 @@ Almost no read passed through where the hooks were watching:
 - reads issued by other tools, such as third-party MCP servers, fell outside the matcher
 
 That is what the lexical parser is for. Each of those five shapes is a test case.
+
+### Why bytes and not lines
+
+A line looked like a good stand-in for cost, and it is not. Measured across 11,692 files in
+three projects, bytes per line ranges from 10 to 990. Between the 10th and 90th percentiles it
+only varies 2.6 times, which is why the line-based rule seemed to work, and the tail is where it
+breaks.
+
+Comparing the old 180-line threshold against an equivalent token threshold over those files:
+
+| Result | Files | Share |
+|---|---|---|
+| Agree | 11,021 | 94.3% |
+| Passed on lines, expensive in tokens | 427 | 3.7% |
+
+That 94% hides what matters. The 427 files that escaped hold 1.2 million tokens, and the worst
+of them is a single-line JSON of 131 thousand tokens, more than half a 200k context window. The
+line rule never even looked at it.
+
+The error is asymmetric. Blocking a cheap file wastes one round trip, roughly 1,500 tokens.
+Letting a dense one through can waste the conversation. That is a ratio of nearly a hundred to
+one, and it decides which way to err.
+
+Switching the unit protected 438 files holding 1.67 million tokens, and released 219 files that
+were being blocked for having many short lines.
+
+The conversion also stopped being a guess. Measured on the Gemma tokenizer, bytes per token runs
+from 2.09 in dense JSON to 3.66 in generated Python; the earlier estimate of 4.0 understated
+cost by about 30%, and by nearly 90% exactly where the risk is highest. The ratio is now learned
+from the same calibration that sizes the timeout.
 
 ### Adapting to the machine
 
@@ -243,15 +278,15 @@ Copy `hooks/hooks.json` into the `hooks` section of your `settings.json`, replac
 
 ### Tuning the threshold
 
-The default is 250 lines. Because of the floor at twice the edit window, values below 160 have
-no effect unless you shrink `SHUNT_EDIT_WINDOW` too. For aggressive use, lower both. In
-`~/.claude/settings.json`:
+The default is 6,480 bytes, roughly 2,100 tokens. Because of the floor at twice the edit
+window, values below that have no effect unless you shrink `SHUNT_EDIT_BYTES` too. For
+aggressive use, lower both. In `~/.claude/settings.json`:
 
 ```json
 {
   "env": {
-    "SHUNT_MIN_LINES": "160",
-    "SHUNT_EDIT_WINDOW": "60",
+    "SHUNT_MIN_BYTES": "4000",
+    "SHUNT_EDIT_BYTES": "1500",
     "SHUNT_MODEL": "gemma4:e4b",
     "SHUNT_NUM_CTX": "32768"
   }
@@ -259,8 +294,8 @@ no effect unless you shrink `SHUNT_EDIT_WINDOW` too. For aggressive use, lower b
 ```
 
 A tighter threshold blocks more, and every block costs either a delegation of tens of seconds
-or a piece of information Claude will do without. Measured on real logs, dropping from 250 to
-160 raised the block rate from 32% to 41% and the denial count from 78 to 97.
+or a piece of information Claude will do without. Use `scripts/shunt-stats` to see where your
+own setting lands before tightening it.
 
 ## Using bulk-read
 
@@ -312,10 +347,11 @@ few lines, so verify exact values before an `Edit`.
 | `SHUNT_TEMPERATURE` | `0.2` | same as the original |
 | `SHUNT_NUM_CTX` | `32768` | context window; Ollama starts at 4096 if unset, and then truncates silently |
 | `SHUNT_KEEP_ALIVE` | `30m` | keeps the model loaded between calls |
-| `SHUNT_MIN_LINES` | `180` | out-of-scope size and per-file reading budget, floored at `2 × EDIT_WINDOW` |
-| `SHUNT_EDIT_WINDOW` | `80` | largest single editing read |
-| `SHUNT_ESCAPE_BUDGET` | `80` | extra lines for editing reads after the budget is spent |
-| `SHUNT_MAX_TOTAL_LINES` | `3 × MIN_LINES` | sum across several files in one command |
+| `SHUNT_MIN_BYTES` | `6480` | out-of-scope size and per-file reading budget, floored at `2 × EDIT_BYTES` |
+| `SHUNT_EDIT_BYTES` | `2880` | largest single editing read |
+| `SHUNT_ESCAPE_BYTES` | `2880` | extra bytes for editing reads after the budget is spent |
+| `SHUNT_MIN_LINES` | unset | legacy: converted at 36 bytes per line when `SHUNT_MIN_BYTES` is absent |
+| `SHUNT_MAX_TOTAL_BYTES` | `3 × MIN_BYTES` | sum across several files in one command |
 | `SHUNT_WARN_RATIO` | `50` | warns when the answer exceeds this share of the content read |
 | `SHUNT_TIMEOUT_SECONDS` | unset | fixed timeout in seconds; overrides the calculated one |
 | `SHUNT_TIMEOUT_SLACK` | `200` | % of the predicted time allowed before giving up |
@@ -374,7 +410,7 @@ to one path.
 The rest shows decisions per tool, most-blocked files, and tokens delegated to Ollama against
 tokens returned to Claude.
 
-The log is TSV with eleven columns:
+The log is TSV with thirteen columns:
 
 | # | Column | Content |
 |---|---|---|
@@ -388,7 +424,9 @@ The log is TSV with eleven columns:
 | 8 | effective | lines that would enter the context |
 | 9 | version | plugin version that made the decision |
 | 10 | ranges | the line ranges this read asked for, e.g. `1-80` or `10-25,60-90` |
-| 11 | covered | total lines of the file already read in this session |
+| 11 | covered | bytes of the file already read in this session |
+| 12 | total bytes | size of the whole file |
+| 13 | read bytes | bytes this read would bring |
 
 Columns 10 and 11 exist so that diagnosing slicing is a query over the log rather than a
 reconstruction from session transcripts. Lines written before 0.4.0 have eight columns and ones
@@ -397,11 +435,11 @@ which keeps the baseline for comparison. During an upgrade both versions appear 
 sessions already open keep running the old hooks until restarted.
 
 Reasons: `small-file` (file under the threshold, out of scope), `counted` (charged to the
-budget), `escape` (charged to the escape balance after the budget was spent), `single-read`
-(denied on size), `cumulative` (denied because the budget is spent), `escape-exhausted` (denied
-because the escape balance is spent too), `multi-file` (denied on the sum), `ollama-off`
-(allowed because no model is available), `threshold-floor` (the configured threshold was raised
-to the floor), plus `heredoc` and `unresolved:$VAR` (not analyzable).
+budget), `escape` (charged to the escape balance after the budget was spent), `binary` (not text,
+left alone), `single-read` (denied on size), `cumulative` (denied because the budget is spent),
+`escape-exhausted` (denied because the escape balance is spent too), `multi-file` (denied on the
+sum), `ollama-off` (allowed because no model is available), `threshold-floor` (the configured
+threshold was raised to the floor), plus `heredoc` and `unresolved:$VAR` (not analyzable).
 
 Earlier versions also wrote `always-free`, `edit-window` and `window-counted`, from the exempt
 bands that 0.5.0 removed.
@@ -453,6 +491,11 @@ language of the routing text the hooks inject.
 
 ## Changelog
 
+- **0.9.0** — the decision unit changed from lines to bytes. A line is not a proxy for cost: a
+  single-line JSON of 131 thousand tokens used to pass untouched. The switch protected 438 files
+  holding 1.67 million tokens and released 219 that were blocked for having short lines. Bytes
+  per token is now measured on the tokenizer in use instead of assumed, binary files are left
+  alone, and the log carries byte columns.
 - **0.8.0** — the timeout is derived from speed measured on the machine itself instead of a
   constant: each call records tokens and wall time per model, the 20th percentile sizes the
   timeout and the median feeds the estimate in a denial. Samples from a cached prompt are
