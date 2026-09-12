@@ -138,8 +138,8 @@ class RangeMathTest(unittest.TestCase):
 
 
 class ThresholdFloorTest(unittest.TestCase):
-    """O limiar não pode ficar rente à janela de edição: entre 81 e 100 linhas
-    a faixa contável era estreita demais e gerava negativas de pouco valor."""
+    """O limiar não pode ficar rente à janela de edição: uma faixa contável
+    estreita gera negativas de economia quase nula."""
 
     def run_probe(self, env_extra):
         code = ("import sys; sys.path.insert(0, %r); import shunt_common as sc; "
@@ -166,7 +166,7 @@ class ThresholdFloorTest(unittest.TestCase):
                 "print(sc.MIN_LINES)" % os.path.join(ROOT, "hooks", "lib"))
         out = subprocess.run([sys.executable, "-c", code], capture_output=True,
                              text=True, env=env)
-        self.assertEqual(int(out.stdout.strip()), 250)
+        self.assertEqual(int(out.stdout.strip()), 180)
 
 
 class EstimateTest(unittest.TestCase):
@@ -195,9 +195,8 @@ class HookEndToEndTest(unittest.TestCase):
         self.dir = self.tmp.name
         self.big = make_file(self.dir, "big.md", 900)
         self.small = make_file(self.dir, "small.md", 50)
-        self.env = {**os.environ, "SHUNT_MIN_LINES": "250",
-                    "SHUNT_EDIT_WINDOW": "80", "SHUNT_EDIT_FREE": "1",
-                    "SHUNT_ALWAYS_FREE": "25",
+        self.env = {**os.environ, "SHUNT_MIN_LINES": "180",
+                    "SHUNT_EDIT_WINDOW": "80", "SHUNT_ESCAPE_BUDGET": "80",
                     "SHUNT_ASSUME_OLLAMA": "1", "TMPDIR": self.dir,
                     "SHUNT_HOOK_LOG": os.path.join(self.dir, "log.tsv"),
                     "CLAUDE_PLUGIN_ROOT": ROOT}
@@ -224,7 +223,7 @@ class HookEndToEndTest(unittest.TestCase):
     def reasons_logged(self):
         with open(self.env["SHUNT_HOOK_LOG"], encoding="utf-8") as fh:
             return [ln.split("\t")[4] for ln in fh
-                    if len(ln.rstrip("\n").split("\t")) in (8, 9)]
+                    if len(ln.rstrip("\n").split("\t")) in (8, 9, 11)]
 
     # -- Read ---------------------------------------------------------------
     def test_read_completo_nega(self):
@@ -235,11 +234,6 @@ class HookEndToEndTest(unittest.TestCase):
         out = self.run_hook("check-file-size", "Read",
                             {"file_path": self.big, "limit": 620})
         self.assertEqual(self.decision(out), "deny")
-
-    def test_read_janela_de_edicao_passa(self):
-        out = self.run_hook("check-file-size", "Read",
-                            {"file_path": self.big, "offset": 100, "limit": 60})
-        self.assertEqual(self.decision(out), "allow")
 
     # -- Bash ---------------------------------------------------------------
     def test_bash_cat_nega(self):
@@ -253,76 +247,94 @@ class HookEndToEndTest(unittest.TestCase):
         self.assertEqual(self.decision(out), "allow")
 
     # -- Trecho mínimo sempre livre ----------------------------------------
-    def test_leitura_minima_passa_sempre(self):
-        for _ in range(20):
-            out = self.run_hook("check-bash-read", "Bash",
-                                {"command": f"sed -n '1,20p' {self.big}"})
-            self.assertEqual(self.decision(out), "allow")
-        self.assertIn("always-free", self.reasons_logged())
-
-    def test_minima_continua_livre_apos_acumulado_estourar(self):
-        for start in (1, 101, 201, 301):
-            self.run_hook("check-bash-read", "Bash",
-                          {"command": f"sed -n '{start},{start + 99}p' {self.big}"})
-        out = self.run_hook("check-bash-read", "Bash",
-                            {"command": f"sed -n '500,520p' {self.big}"})
-        self.assertEqual(self.decision(out), "allow")
 
     # -- Janela de edição: primeira livre, seguintes contam -----------------
-    def test_primeira_janela_livre_segunda_conta(self):
-        out = self.run_hook("check-bash-read", "Bash",
-                            {"command": f"sed -n '1,80p' {self.big}"})
-        self.assertEqual(self.decision(out), "allow")
-        out = self.run_hook("check-bash-read", "Bash",
-                            {"command": f"sed -n '101,180p' {self.big}"})
-        self.assertEqual(self.decision(out), "allow")
-        logged = self.reasons_logged()
-        self.assertIn("edit-window", logged)
-        self.assertIn("window-counted", logged)
 
-    def test_fatiamento_em_pedacos_de_janela_acaba_bloqueado(self):
-        """O contorno que deixava mais da metade de um arquivo entrar."""
+    # -- Acumulado ----------------------------------------------------------
+
+    # -- Mensagem de deny ---------------------------------------------------
+
+    def test_arquivo_pequeno_fora_de_alcance(self):
+        """Abaixo do limiar o plugin nao se aplica: nao vale delegar."""
+        small = make_file(self.dir, "mid.md", 150)
+        for _ in range(6):
+            out = self.run_hook("check-bash-read", "Bash",
+                                {"command": f"cat {small}"})
+            self.assertEqual(self.decision(out), "allow")
+        self.assertIn("small-file", self.reasons_logged())
+
+    def test_orcamento_por_arquivo_bloqueia_fatiamento(self):
+        """O contorno que devolvia arquivos inteiros em pedacos de 80 linhas."""
         decisions = []
-        for start in range(1, 900, 100):
+        for start in range(1, 900, 80):
             out = self.run_hook("check-bash-read", "Bash",
                                 {"command": f"sed -n '{start},{start + 79}p' {self.big}"})
             decisions.append(self.decision(out))
         self.assertIn("deny", decisions)
-        self.assertLessEqual(decisions.count("allow"), 5)
+        self.assertLessEqual(decisions.count("allow"), 4)
 
-    def test_janela_livre_e_por_arquivo(self):
-        other = make_file(self.dir, "other.md", 900)
-        for path in (self.big, other):
+    def test_fatias_minimas_tambem_esgotam(self):
+        """Leituras de 20 linhas nao sao mais isentas: somam no orcamento."""
+        decisions = []
+        for start in range(1, 500, 20):
             out = self.run_hook("check-bash-read", "Bash",
-                                {"command": f"sed -n '1,80p' {path}"})
-            self.assertEqual(self.decision(out), "allow")
-        self.assertEqual(self.reasons_logged().count("edit-window"), 2)
+                                {"command": f"sed -n '{start},{start + 19}p' {self.big}"})
+            decisions.append(self.decision(out))
+        self.assertIn("deny", decisions)
 
-    # -- Acumulado ----------------------------------------------------------
-    def test_fatiamento_acumulado_nega(self):
-        for start in (1, 101, 201):
-            self.run_hook("check-bash-read", "Bash",
-                          {"command": f"sed -n '{start},{start + 99}p' {self.big}"})
-        out = self.run_hook("check-bash-read", "Bash",
-                            {"command": f"sed -n '301,400p' {self.big}"})
-        self.assertEqual(self.decision(out), "deny")
-        self.assertIn("fatias", self.reason(out))
+    def test_saldo_de_escape_permite_editar_depois_de_estourar(self):
+        self.run_hook("check-bash-read", "Bash",
+                      {"command": f"sed -n '1,180p' {self.big}"})
+        out = self.run_hook("check-file-size", "Read",
+                            {"file_path": self.big, "offset": 300, "limit": 40})
+        self.assertEqual(self.decision(out), "allow")
+        self.assertIn("escape", self.reasons_logged())
 
-    def test_reler_mesma_faixa_nao_acumula(self):
+    def test_saldo_de_escape_e_finito(self):
+        self.run_hook("check-bash-read", "Bash",
+                      {"command": f"sed -n '1,180p' {self.big}"})
+        decisions = []
+        for start in (300, 400, 500, 600):
+            out = self.run_hook("check-file-size", "Read",
+                                {"file_path": self.big, "offset": start, "limit": 40})
+            decisions.append(self.decision(out))
+        self.assertEqual(decisions[-1], "deny")
+        self.assertIn("escape-exhausted", self.reasons_logged())
+
+    def test_reler_mesma_faixa_nao_consome_orcamento(self):
         for _ in range(5):
             out = self.run_hook("check-bash-read", "Bash",
-                                {"command": f"sed -n '1,100p' {self.big}"})
+                                {"command": f"sed -n '1,150p' {self.big}"})
             self.assertEqual(self.decision(out), "allow")
 
-    # -- Mensagem de deny ---------------------------------------------------
-    def test_deny_mostra_os_dois_custos_e_o_comando(self):
+    def test_log_traz_faixas_e_cobertura(self):
+        self.run_hook("check-bash-read", "Bash",
+                      {"command": f"sed -n '10,60p' {self.big}"})
+        with open(self.env["SHUNT_HOOK_LOG"], encoding="utf-8") as fh:
+            cols = fh.readline().rstrip("\n").split("\t")
+        self.assertEqual(len(cols), 11)
+        self.assertEqual(cols[9], "10-60")
+        self.assertEqual(cols[10], "51")
+
+    def test_cobertura_acumula_entre_leituras(self):
+        self.run_hook("check-bash-read", "Bash",
+                      {"command": f"sed -n '1,50p' {self.big}"})
+        self.run_hook("check-bash-read", "Bash",
+                      {"command": f"sed -n '51,100p' {self.big}"})
+        with open(self.env["SHUNT_HOOK_LOG"], encoding="utf-8") as fh:
+            cobertos = [ln.split("\t")[10].strip() for ln in fh
+                        if len(ln.split("\t")) == 11]
+        self.assertEqual(cobertos[-1], "100")
+
+    def test_deny_mostra_os_dois_custos_sem_publicar_limites(self):
         out = self.run_hook("check-file-size", "Read", {"file_path": self.big})
         reason = self.reason(out)
         self.assertIn("scripts/bulk-read", reason)
         self.assertIn("tokens do seu contexto", reason)
         self.assertIn("Custo de delegar", reason)
         self.assertIn("grep", reason)
-        self.assertIn("25 linhas", reason)
+        self.assertIn("somadas por sessão", reason)
+        self.assertNotIn("25 linhas", reason)
 
     # -- Ferramentas MCP ----------------------------------------------------
     def test_mcp_batch_nega(self):
@@ -352,7 +364,7 @@ class HookEndToEndTest(unittest.TestCase):
         self.run_hook("check-bash-read", "Bash", {"command": f"cat {self.big}"})
         with open(self.env["SHUNT_HOOK_LOG"], encoding="utf-8") as fh:
             cols = fh.readline().rstrip("\n").split("\t")
-        self.assertEqual(len(cols), 9)
+        self.assertEqual(len(cols), 11)
         self.assertEqual(cols[3], "deny")
         self.assertEqual(cols[8], sc.VERSION)
 
@@ -453,16 +465,20 @@ class SessionStartTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_injeta_regra_com_os_tres_limiares(self):
+    def test_injeta_regra_sem_publicar_limites(self):
         proc = subprocess.run([os.path.join(ROOT, "hooks", "session-start")],
                               input=json.dumps({"session_id": "s1"}),
                               capture_output=True, text=True, env=self.env)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         text = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("bulk-read", text)
-        self.assertIn("primeira leitura", text)
-        self.assertIn("acumulado", text)
+        self.assertIn("orçamento", text)
+        self.assertIn("somadas", text)
         self.assertIn("grep/rg", text)
+        # Publicar os limites transforma a regra num mapa de contorno.
+        for numero in (str(sc.MIN_LINES), str(sc.EDIT_WINDOW),
+                       str(sc.ESCAPE_BUDGET)):
+            self.assertNotIn(numero, text)
 
 
 if __name__ == "__main__":

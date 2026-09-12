@@ -116,9 +116,28 @@ segunda leitura fecha isso:
 No log inteiro a taxa de bloqueio subiu de 27% para 32%, e os tokens bloqueados de cerca de 78
 mil para 91 mil.
 
-**Como conferir isso você mesmo.** A partir da 0.4.0, cada linha do log carrega a versão do
-plugin, e o `shunt-stats` compara versões lado a lado. Os números acima vieram do replay de
-logs reais; os do seu uso saem de `scripts/shunt-stats`.
+**O que a 0.5.0 corrigiu.** Três dias de trabalho em três projetos, com as faixas isentas em
+vigor, deram 2% de taxa de bloqueio e nenhuma delegação. Reconstruir as faixas reais a partir
+dos transcripts mostrou o porquê: 29 arquivos tiveram 60% ou mais do conteúdo no contexto,
+vários a 100%, montados em leituras pequenas. Nove deles estavam acima do limiar, 2.150 linhas
+que deveriam ter sido barradas.
+
+A causa era o desenho, não evasão. A faixa isenta de 25 linhas era ilimitada e nunca era
+debitada de nada, e absorveu 41% de todas as leituras. O hook de início de sessão publicava os
+tamanhos isentos, então o caminho mais barato era também o documentado.
+
+A 0.5.0 remove todas as faixas isentas. O limiar virou orçamento por arquivo, o saldo de escape
+é medido em linhas, e o texto de roteamento não cita mais nenhum limite:
+
+| Métrica | 0.4.0 | 0.5.0 |
+|---|---|---|
+| Taxa de bloqueio | 5% | 48% |
+| Negativas convertidas em delegação | 0% | 71% |
+
+**Como conferir isso você mesmo.** Cada linha do log carrega a versão do plugin, as faixas
+pedidas e a cobertura já alcançada, e o `shunt-stats` transforma isso numa comparação entre
+versões e num relatório de fatiamento. Os números acima saíram do próprio log, não da leitura
+de transcripts.
 
 **Suíte de testes.** 47 casos, montados a partir dos comandos exatos que versões anteriores
 deixaram passar.
@@ -141,28 +160,36 @@ bloqueio é tentar contornar.
 
 ### Regras de decisão
 
-Em `hooks/lib/shunt_common.py`:
+Em `hooks/lib/shunt_common.py`. O limiar responde duas perguntas: pelo tamanho total do arquivo
+ele decide se o plugin se aplica, e quando se aplica, vira o orçamento de leitura daquele
+arquivo na sessão.
 
-1. Leitura de até `SHUNT_ALWAYS_FREE` (25) linhas passa sempre e nunca é contada. É a válvula
-   de escape que mantém a edição cirúrgica possível mesmo depois de o acumulado do arquivo ter
-   estourado.
-2. A primeira leitura de até `SHUNT_EDIT_WINDOW` (80) linhas de cada arquivo também passa livre
-   e sem contar, tantas quantas `SHUNT_EDIT_FREE` (1) permitir. Da segunda em diante ela entra
-   no acumulado. Fatiar o arquivo em pedaços de 80 linhas contornava o plugin por completo.
-3. Leitura acima de `SHUNT_MIN_LINES` (250) é negada. A negativa compara os dois custos, ler
-   direto contra delegar, e traz o comando `bulk-read` pronto para colar.
-4. **Anti-fatiamento.** As faixas lidas de cada arquivo são guardadas por sessão como união de
-   intervalos. Quando o acumulado passa do limiar, a próxima fatia é negada. Reler a mesma
-   faixa não faz o total crescer.
-5. Vários arquivos num único comando acima de `SHUNT_MAX_TOTAL_LINES` (3× o limiar) também são
+1. Arquivo com até `SHUNT_MIN_LINES` (180) linhas está **fora de alcance**. Delegar custa mais
+   do que ler, então ele nunca entra em orçamento algum. Registrado como `small-file`.
+2. Acima disso, toda leitura do arquivo consome o orçamento. Não existe tamanho isento nem
+   primeira leitura livre. As faixas são guardadas por sessão como união de intervalos, então
+   reler a mesma faixa não faz o total crescer, e dividir a leitura em pedaços não compra mais
+   linhas.
+3. Esgotado o orçamento, restam `SHUNT_ESCAPE_BUDGET` (80) linhas extras em leituras de até
+   `SHUNT_EDIT_WINDOW` (80) linhas cada, para que editar o trecho apontado pelo modelo local
+   continue possível. Medido em linhas, e não em número de leituras: contar leituras permitia
+   três de 80, o que devolvia arquivos de 300 linhas inteiros.
+4. Vários arquivos num único comando acima de `SHUNT_MAX_TOTAL_LINES` (3× o limiar) também são
    negados.
-6. Se o Ollama não responde, **nenhum bloqueio acontece**. A sondagem é cacheada por 2 minutos.
+5. Se o Ollama não responde, **nenhum bloqueio acontece**. A sondagem é cacheada por 2 minutos.
    Bloquear sem ter para onde delegar só travaria o Claude.
 
-O limiar tem piso de duas vezes a janela de edição. Um limiar rente à janela deixa uma faixa
-estreita de leituras contáveis e produz negativas de economia quase nula. Configurar
-`SHUNT_MIN_LINES=100` com a janela padrão resulta em 160 efetivos, registrado como
-`threshold-floor` no início da sessão.
+O limiar tem piso de duas vezes a janela de edição, registrado como `threshold-floor` no início
+da sessão.
+
+A proteção é proporcionalmente mais fraca em arquivos pouco acima do limiar: um arquivo de 300
+linhas com orçamento 180 e escape 80 ainda pode chegar a 87% de cobertura. O ganho real está
+nos arquivos grandes, onde 260 linhas de 4.000 são 6%.
+
+O hook de início de sessão enuncia a regra sem publicar os números. A versão anterior listava
+os tamanhos isentos, e o log mostrou o resultado: 41% das leituras couberam exatamente na faixa
+isenta, e arquivos acima do limiar chegaram ao contexto inteiros, montados em fatias. Um limite
+publicado é um mapa de contorno.
 
 ### O que o parser reconhece
 
@@ -263,10 +290,9 @@ errar alguns números de linha, então confira valores exatos antes de um `Edit`
 | `SHUNT_TEMPERATURE` | `0.2` | mesma do original |
 | `SHUNT_NUM_CTX` | `32768` | janela de contexto; o Ollama sobe com 4096 se você não setar, e aí trunca em silêncio |
 | `SHUNT_KEEP_ALIVE` | `30m` | mantém o modelo carregado entre chamadas |
-| `SHUNT_MIN_LINES` | `250` | limiar de bloqueio, com piso de `2 × EDIT_WINDOW` |
-| `SHUNT_EDIT_WINDOW` | `80` | o que conta como leitura de edição |
-| `SHUNT_EDIT_FREE` | `1` | quantas leituras de edição por arquivo passam sem contar |
-| `SHUNT_ALWAYS_FREE` | `25` | leituras até este tamanho nunca contam e nunca são negadas |
+| `SHUNT_MIN_LINES` | `180` | tamanho fora de alcance e orçamento de leitura por arquivo, com piso de `2 × EDIT_WINDOW` |
+| `SHUNT_EDIT_WINDOW` | `80` | maior leitura de edição individual |
+| `SHUNT_ESCAPE_BUDGET` | `80` | linhas extras para leituras de edição após o orçamento acabar |
 | `SHUNT_MAX_TOTAL_LINES` | `3 × MIN_LINES` | soma de vários arquivos num só comando |
 | `SHUNT_TIMEOUT_SECONDS` | `180` | timeout do `curl` |
 | `SHUNT_HOOK_LOG` | `~/.claude/shunt.log` | log TSV de decisões |
@@ -278,7 +304,8 @@ errar alguns números de linha, então confira valores exatos antes de um `Edit`
 ```bash
 scripts/shunt-stats
 scripts/shunt-stats --since 2026-09-01
-scripts/shunt-stats --version 0.4.0
+scripts/shunt-stats --version 0.5.0
+scripts/shunt-stats --file install.sh --top 20
 ```
 
 A primeira seção compara versões do plugin, para você saber se uma mudança realmente funcionou
@@ -298,10 +325,25 @@ falharam. `conversão` é a fração de negativas seguidas de uma delegação em
 o número que diz se o plugin está sendo usado como desvio ou apenas como freio. Amostra abaixo
 de 30 eventos recebe aviso explícito, e conversão abaixo de 20% também.
 
+Uma segunda seção mostra quanto de cada arquivo chegou ao contexto, e sinaliza fatiamento:
+
+```text
+Cobertura por arquivo e sessão (top 10 por percentual)
+   coberto   total     %  leituras  fatias  arquivo
+       240     299   80%         4       3  mia-cli/install.sh
+       266    4289    6%        11      11  claude-local/claude-local.sh
+
+  Fatiamento: 1 arquivo(s) com 50%+ de cobertura montada em 3+ leituras de até 80 linhas
+```
+
+`fatias` conta as leituras de até 80 linhas. Um arquivo com cobertura alta montada quase toda em
+fatias é a assinatura de leitura em volta do orçamento, e `--file` restringe qualquer das seções
+a um caminho.
+
 O resto mostra decisões por ferramenta, arquivos mais bloqueados e tokens delegados ao Ollama
 contra tokens devolvidos ao Claude.
 
-O log é TSV com nove colunas:
+O log é TSV com onze colunas:
 
 | # | Coluna | Conteúdo |
 |---|---|---|
@@ -314,18 +356,25 @@ O log é TSV com nove colunas:
 | 7 | total | linhas do arquivo |
 | 8 | efetivo | linhas que entrariam no contexto |
 | 9 | versão | versão do plugin que tomou a decisão |
+| 10 | faixas | as faixas de linha que esta leitura pediu, ex. `1-80` ou `10-25,60-90` |
+| 11 | coberto | total de linhas do arquivo já lidas nesta sessão |
 
-Linhas gravadas antes da 0.4.0 têm oito colunas. O `shunt-stats` continua lendo essas linhas e
-as agrupa como `<=0.3.0`, o que preserva a linha de base para comparação. Durante uma
-atualização as duas versões aparecem no mesmo log: sessões já abertas seguem com os hooks
-antigos até serem reiniciadas.
+As colunas 10 e 11 existem para que diagnosticar fatiamento seja uma consulta ao log, e não uma
+reconstrução a partir dos transcripts das sessões. Linhas gravadas antes da 0.4.0 têm oito
+colunas e as da 0.4.0 têm nove; o `shunt-stats` lê os três formatos e agrupa os mais antigos
+como `<=0.3.0`, o que preserva a linha de base para comparação. Durante uma atualização as duas
+versões aparecem no mesmo log: sessões já abertas seguem com os hooks antigos até serem
+reiniciadas.
 
-Motivos: `always-free` (≤ 25 linhas, nunca contada), `edit-window` (primeira leitura de edição
-do arquivo, livre), `window-counted` (leitura de edição posterior, somada), `counted` (leitura
-média, somada), `single-read` (negada por tamanho), `cumulative` (negada pelo acumulado de
-fatias), `multi-file` (negada pela soma), `ollama-off` (liberada por falta do modelo),
-`threshold-floor` (o limiar configurado foi elevado ao piso), `heredoc` e `unresolved:$VAR`
-(não analisável).
+Motivos: `small-file` (arquivo abaixo do limiar, fora de alcance), `counted` (debitada do
+orçamento), `escape` (debitada do saldo de escape depois de o orçamento acabar), `single-read`
+(negada por tamanho), `cumulative` (negada porque o orçamento acabou), `escape-exhausted`
+(negada porque o saldo de escape também acabou), `multi-file` (negada pela soma), `ollama-off`
+(liberada por falta do modelo), `threshold-floor` (o limiar configurado foi elevado ao piso),
+`heredoc` e `unresolved:$VAR` (não analisável).
+
+Versões anteriores também gravavam `always-free`, `edit-window` e `window-counted`, das faixas
+isentas que a 0.5.0 removeu.
 
 O estado por sessão fica em `$TMPDIR/shunt-state-<session_id>.json`. Apagar reseta o acumulado.
 
@@ -356,6 +405,12 @@ Os comentários e a documentação no código estão em português brasileiro.
 
 ## Changelog
 
+- **0.5.0** — o limiar virou orçamento de leitura por arquivo e todas as faixas isentas
+  desapareceram, fechando o caminho de fatiamento que deixava arquivos inteiros chegarem ao
+  contexto. O saldo de escape depois de o orçamento acabar é medido em linhas. O texto de
+  roteamento deixa de publicar os limites. O log ganha as faixas pedidas e a cobertura
+  acumulada, e o `shunt-stats` relata cobertura e sinaliza fatiamento, então diagnosticar isso
+  não exige mais ler transcripts. O limiar padrão cai de 250 para 180.
 - **0.4.0** — cada linha do log carrega a versão do plugin como nona coluna, e o `shunt-stats`
   compara versões lado a lado, então o efeito de uma mudança passa a ser medido em vez de
   inferido. Linhas de oito colunas das versões anteriores continuam sendo lidas e agrupadas

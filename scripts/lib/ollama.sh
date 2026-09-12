@@ -68,11 +68,13 @@ shunt_preflight() {
   return 0
 }
 
-# Linha no mesmo TSV dos hooks:
-#   ts, sessão, ferramenta, decisão, motivo, path, total, efetivo, versão
+# Linha no mesmo TSV dos hooks: ts, sessão, ferramenta, decisão, motivo,
+# path, total, efetivo, versão, faixas, cobertura acumulada. As duas últimas
+# não se aplicam a uma delegação, que lê o arquivo todo fora do contexto.
 shunt_log_line() {
   local tool="$1" decision="$2" reason="$3" path="${4:--}" total="${5:-0}" eff="${6:-0}"
-  printf '%s\t-\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S)" \
+  printf '%s\t-\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t-\t0\n' \
+    "$(date +%Y-%m-%dT%H:%M:%S)" \
     "$tool" "$decision" "$reason" "$path" "$total" "$eff" "$SHUNT_VERSION" \
     >> "$SHUNT_HOOK_LOG" 2>/dev/null
 }

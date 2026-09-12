@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Hook SessionStart: injeta a regra de roteamento de leitura no contexto.
 
-Sem isso o modelo só descobre o shunt quando um deny acontece, e aí tende a
-fatiar o arquivo em vez de delegar. Também registra se o Ollama está de pé e
-se o limiar configurado precisou ser elevado até o piso.
+Sem isso o modelo só descobre o shunt quando um deny acontece, e a reação
+natural a um bloqueio é tentar contornar.
+
+O texto descreve o caminho certo sem publicar os números que definem os
+limites. A versão anterior listava o tamanho das leituras que passavam livres,
+e a análise do log mostrou o resultado: 41% das leituras couberam exatamente
+na faixa isenta, e arquivos acima do limiar chegaram ao contexto inteiros,
+montados em fatias. Um limite publicado é um mapa de contorno.
 """
 
 import json
@@ -21,24 +26,22 @@ def routing_text(ollama_up: bool) -> str:
               "`ollama serve` responder.")
     return (
         "[shunt-ollama] Roteamento de leitura de arquivos.\n"
-        f"- Leituras de até {sc.ALWAYS_FREE} linhas passam sempre. Use esse "
-        "tamanho para abrir um trecho que você já sabe onde está.\n"
-        f"- A primeira leitura de até {sc.EDIT_WINDOW} linhas de cada arquivo "
-        "também passa livre. Da segunda em diante ela entra no acumulado do "
-        "arquivo.\n"
-        f"- Read/cat/head/tail/sed -n/awk (inclusive dentro de ferramentas MCP "
-        f"que executam shell) são BLOQUEADOS acima de {sc.MIN_LINES} linhas "
-        "efetivas, e também quando a soma das faixas já lidas do mesmo arquivo "
-        "passa desse limiar. Fatiar com offset/limit ou sed -n não contorna.\n"
+        "- Cada arquivo grande tem um orçamento de leitura por sessão. Read, "
+        "cat, head, tail, sed -n e awk consomem esse orçamento, inclusive "
+        "dentro de ferramentas MCP que executam shell. Quando ele acaba, a "
+        "leitura é bloqueada.\n"
+        "- O orçamento é do arquivo, não da leitura: dividir em pedaços não "
+        "aumenta o que você consegue ler, porque as faixas são somadas.\n"
         "- Para entender, resumir ou responder perguntas sobre arquivo grande, "
         "diff grande ou vários arquivos, delegue ao modelo local:\n"
         f"    {sc.BULK_READ} --question \"<pergunta específica>\" --paths <arquivos>\n"
         "  Variantes: --cmd \"git diff main\" | --glob 'src/**/*.rs' | --stdin. "
         "A resposta vem em bullets `Nome (path:Lini-Lfim)`, custa 0 tokens do "
-        "seu contexto e leva dezenas de segundos.\n"
-        "- Pergunta específica comprime bem; pergunta vaga faz o modelo local "
-        "enumerar tudo e devolver quase o volume original.\n"
-        "- Para LOCALIZAR um símbolo use grep/rg, nunca cat.\n"
+        "seu contexto e leva dezenas de segundos. Pergunta específica comprime "
+        "bem; pergunta vaga faz o modelo enumerar tudo.\n"
+        "- Depois de delegar, abra com Read apenas o trecho que vai editar, "
+        "usando as linhas que a resposta apontou.\n"
+        "- Para LOCALIZAR um símbolo use grep/rg, que não consome orçamento.\n"
         f"- {status}"
     )
 

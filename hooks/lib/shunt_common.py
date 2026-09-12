@@ -1,8 +1,19 @@
 """Utilitários compartilhados pelos hooks do shunt-ollama.
 
-Concentra o que antes estava duplicado nos dois hooks em bash: leitura do
-input do hook, limiares, log de decisões, estado por sessão (faixas já lidas
-de cada arquivo) e a emissão do JSON de deny no formato atual do Claude Code.
+Concentra leitura do input do hook, limiares, log de decisões, estado por
+sessão (faixas já lidas de cada arquivo) e a emissão do JSON de deny no
+formato atual do Claude Code.
+
+Desenho da decisão, desde a 0.5.0: o limiar responde duas perguntas. Pelo
+tamanho total do arquivo ele diz se o plugin se aplica (não vale delegar um
+arquivo pequeno); quando se aplica, ele vira o orçamento de cobertura daquele
+arquivo na sessão. Toda leitura entra no orçamento, sem faixa livre ilimitada.
+Esgotado o orçamento, resta um pequeno saldo de linhas para leituras de edição.
+
+A proteção é proporcionalmente mais fraca em arquivos pouco acima do limiar:
+um arquivo de 300 linhas com orçamento 180 e saldo 80 pode chegar a 87% de
+cobertura. O ganho real está nos arquivos grandes, onde 260 de 4000 linhas
+são 6%.
 """
 
 from __future__ import annotations
@@ -29,22 +40,21 @@ def _env_int(name: str, default: int) -> int:
     return int(raw) if raw.isdigit() else default
 
 
-# Leitura de edição: o trecho que o Claude abre para editar depois de
-# consultar o modelo local.
+# Tamanho máximo de uma leitura de edição, e teto de cada leitura permitida
+# pelo saldo de escape.
 EDIT_WINDOW = _env_int("SHUNT_EDIT_WINDOW", 80)
-# Quantas leituras de janela por arquivo passam sem entrar no acumulado. A
-# partir da seguinte elas contam: fatiar em pedaços de 80 linhas era o
-# contorno que deixava mais da metade de um arquivo entrar no contexto.
-EDIT_FREE = _env_int("SHUNT_EDIT_FREE", 1)
-# Válvula de escape: leitura até este tamanho nunca conta e nunca é negada,
-# para que editar um trecho já conhecido continue possível mesmo com o
-# acumulado estourado.
-ALWAYS_FREE = _env_int("SHUNT_ALWAYS_FREE", 25)
-# Limiar de bloqueio. O piso de 2× a janela evita a faixa estreita que
-# gerava negativas de 83 a 96 linhas com economia mínima.
-_MIN_LINES_RAW = _env_int("SHUNT_MIN_LINES", 250)
+# Limiar: arquivo com até tantas linhas fica fora do alcance do plugin;
+# acima disso, este é o orçamento de cobertura por sessão. O piso de 2× a
+# janela evita uma faixa contável estreita demais.
+_MIN_LINES_RAW = _env_int("SHUNT_MIN_LINES", 180)
 MIN_LINES = max(_MIN_LINES_RAW, EDIT_WINDOW * 2)
 MIN_LINES_ADJUSTED = MIN_LINES != _MIN_LINES_RAW
+# Linhas de leitura de edição liberadas depois de o orçamento estourar.
+# Existe para que editar um trecho apontado pelo modelo local continue
+# possível. É medido em linhas, e não em número de leituras: contar leituras
+# permitia três de 80, o que somava 240 extras e devolvia arquivos de ~300
+# linhas inteiros ao contexto.
+ESCAPE_BUDGET = _env_int("SHUNT_ESCAPE_BUDGET", EDIT_WINDOW)
 # Soma de linhas efetivas de vários arquivos num único comando.
 MAX_TOTAL_LINES = _env_int("SHUNT_MAX_TOTAL_LINES", MIN_LINES * 3)
 
@@ -116,16 +126,36 @@ def deny(reason: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# Log de decisões, TSV com 9 colunas:
-#   ts, sessão, ferramenta, decisão, motivo, path, total, efetivo, versão
-# Linhas de 8 colunas são de versões até a 0.3.0 e ainda são lidas pelo
-# shunt-stats, que as agrupa como "<=0.3.0".
+# Log de decisões, TSV com 11 colunas:
+#   ts, sessão, ferramenta, decisão, motivo, path, total, efetivo, versão,
+#   faixas desta leitura, cobertura acumulada do arquivo na sessão
+# As duas últimas existem para que analisar fatiamento seja uma consulta ao
+# log, e não uma reconstrução a partir dos transcripts. Linhas de 8 ou 9
+# colunas são de versões anteriores e o shunt-stats ainda as lê.
 # --------------------------------------------------------------------------
+def format_ranges(ranges: Iterable[Range]) -> str:
+    out = ",".join(f"{a}-{b}" for a, b in merge_ranges(list(ranges)))
+    return out or "-"
+
+
+def parse_ranges(text: str) -> List[Range]:
+    out: List[Range] = []
+    if not text or text == "-":
+        return out
+    for part in text.split(","):
+        a, _, b = part.partition("-")
+        if a.isdigit() and b.isdigit():
+            out.append((int(a), int(b)))
+    return out
+
+
 def log(session: str, tool: str, decision: str, reason: str,
-        path: str = "", total: int = 0, effective: int = 0) -> None:
+        path: str = "", total: int = 0, effective: int = 0,
+        ranges: Optional[Iterable[Range]] = None, covered: int = 0) -> None:
     line = "\t".join([
         time.strftime("%Y-%m-%dT%H:%M:%S"), session or "-", tool, decision,
         reason, path or "-", str(total), str(effective), VERSION,
+        format_ranges(ranges or []), str(covered),
     ])
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as fh:
@@ -193,7 +223,7 @@ class State:
 
     def __init__(self, session: str):
         self.path = state_path(session)
-        self.data: dict = {"files": {}, "windows": {}, "ollama": {}}
+        self.data: dict = {"files": {}, "escapes": {}, "ollama": {}}
         self._fh = None
 
     def __enter__(self) -> "State":
@@ -205,7 +235,7 @@ class State:
             if raw:
                 self.data = json.loads(raw)
             self.data.setdefault("files", {})
-            self.data.setdefault("windows", {})
+            self.data.setdefault("escapes", {})
             self.data.setdefault("ollama", {})
         except (OSError, ValueError):
             self._fh = None
@@ -227,15 +257,16 @@ class State:
     def ranges(self, path: str) -> List[Range]:
         return [tuple(r) for r in self.data["files"].get(path, [])]
 
-    def add_ranges(self, path: str, ranges: Iterable[Range]) -> None:
+    def add_ranges(self, path: str, ranges: Iterable[Range]) -> int:
         merged = merge_ranges(list(self.ranges(path)) + list(ranges))
         self.data["files"][path] = [list(r) for r in merged]
+        return coverage(merged)
 
-    def windows_used(self, path: str) -> int:
-        return int(self.data["windows"].get(path, 0))
+    def escape_lines(self, path: str) -> int:
+        return int(self.data["escapes"].get(path, 0))
 
-    def mark_window(self, path: str) -> None:
-        self.data["windows"][path] = self.windows_used(path) + 1
+    def add_escape_lines(self, path: str, lines: int) -> None:
+        self.data["escapes"][path] = self.escape_lines(path) + lines
 
     def ollama_ok(self) -> bool:
         """Se o Ollama está fora, bloquear leitura só travaria o Claude."""
@@ -298,8 +329,8 @@ def bulk_read_command(paths: List[str]) -> str:
 
 
 def decide(session: str, tool: str, requests: Dict[str, List[Request]]) -> None:
-    """Aplica limiares, acumulado por sessão e total por comando. Nunca retorna
-    sem encerrar o processo (allow/deny)."""
+    """Aplica o orçamento por arquivo, a cota de escape e o total por comando.
+    Nunca retorna sem encerrar o processo (allow/deny)."""
     if not requests:
         allow()
 
@@ -311,8 +342,8 @@ def decide(session: str, tool: str, requests: Dict[str, List[Request]]) -> None:
 
         denials: List[str] = []
         denied_paths: List[str] = []
-        pending: Dict[str, List[Range]] = {}
-        windows: List[str] = []
+        # path -> (faixas, motivo, consome_orçamento_de_escape)
+        pending: Dict[str, Tuple[List[Range], str, bool]] = {}
         grand_total = 0
 
         for path, reqs in requests.items():
@@ -322,41 +353,50 @@ def decide(session: str, tool: str, requests: Dict[str, List[Request]]) -> None:
             if effective == 0:
                 continue
 
-            # Trecho mínimo: sempre livre, para não travar edição pontual.
-            if effective <= ALWAYS_FREE:
-                log(session, tool, "allow", "always-free", path, total, effective)
-                continue
-
-            # Janela de edição: as primeiras EDIT_FREE leituras por arquivo
-            # passam sem contar; as seguintes entram no acumulado.
-            if effective <= EDIT_WINDOW and state.windows_used(path) < EDIT_FREE:
-                windows.append(path)
-                log(session, tool, "allow", "edit-window", path, total, effective)
+            # Arquivo pequeno: delegar custa mais do que ler. O plugin não se
+            # aplica, e por isso nem entra no orçamento.
+            if total <= MIN_LINES:
+                log(session, tool, "allow", "small-file", path, total,
+                    effective, ranges, effective)
                 continue
 
             grand_total += effective
-            if effective > MIN_LINES:
-                denials.append(
-                    f"{path}: {effective} de {total} linhas pedidas "
-                    f"(limiar {MIN_LINES})."
-                )
-                denied_paths.append(path)
-                log(session, tool, "deny", "single-read", path, total, effective)
-                continue
-
             already = coverage(state.ranges(path))
             after = coverage(state.ranges(path) + ranges)
-            if after > MIN_LINES:
-                denials.append(
-                    f"{path}: você já leu {already} linhas deste arquivo em "
-                    f"fatias nesta sessão; com estas {effective} passaria de "
-                    f"{MIN_LINES}. Fatiar não é a saída."
-                )
-                denied_paths.append(path)
-                log(session, tool, "deny", "cumulative", path, total, effective)
+
+            if after <= MIN_LINES:
+                pending[path] = (ranges, "counted", False)
                 continue
 
-            pending[path] = ranges
+            # Orçamento estourado. Uma leitura de edição ainda passa, mas
+            # apenas enquanto houver cota: é o que separa editar um trecho de
+            # reconstruir o arquivo inteiro em pedaços.
+            escaped = state.escape_lines(path)
+            if (effective <= EDIT_WINDOW
+                    and escaped + effective <= ESCAPE_BUDGET):
+                pending[path] = (ranges, "escape", True)
+                continue
+
+            if effective > MIN_LINES:
+                reason, detail = "single-read", (
+                    f"{path}: {effective} de {total} linhas pedidas "
+                    f"(orçamento {MIN_LINES})."
+                )
+            elif effective <= EDIT_WINDOW:
+                reason, detail = "escape-exhausted", (
+                    f"{path}: o arquivo já está com {already} linhas lidas "
+                    f"nesta sessão e as {escaped} linhas de edição extra "
+                    "também já foram usadas."
+                )
+            else:
+                reason, detail = "cumulative", (
+                    f"{path}: você já leu {already} linhas deste arquivo nesta "
+                    f"sessão; com estas {effective} passaria de {MIN_LINES}."
+                )
+            denials.append(detail)
+            denied_paths.append(path)
+            log(session, tool, "deny", reason, path, total, effective,
+                ranges, already)
 
         if not denials and grand_total > MAX_TOTAL_LINES:
             denials.append(
@@ -364,27 +404,29 @@ def decide(session: str, tool: str, requests: Dict[str, List[Request]]) -> None:
                 f"comando (limite {MAX_TOTAL_LINES})."
             )
             denied_paths.extend(pending)
-            for path in pending:
+            for path, (ranges, _, _) in pending.items():
                 log(session, tool, "deny", "multi-file", path,
-                    count_lines(path), coverage(pending[path]))
+                    count_lines(path), coverage(ranges), ranges,
+                    coverage(state.ranges(path)))
 
         if denials:
             deny(build_deny_message(denials, denied_paths))
 
-        for path in windows:
-            state.mark_window(path)
-        for path, ranges in pending.items():
-            state.add_ranges(path, ranges)
-            reason = ("window-counted" if coverage(ranges) <= EDIT_WINDOW
-                      else "counted")
+        for path, (ranges, reason, consumes) in pending.items():
+            if consumes:
+                state.add_escape_lines(path, coverage(ranges))
+            covered = state.add_ranges(path, ranges)
             log(session, tool, "allow", reason, path, count_lines(path),
-                coverage(ranges))
+                coverage(ranges), ranges, covered)
     allow()
 
 
 def build_deny_message(denials: List[str], paths: List[str]) -> str:
     """A negativa precisa competir com a saída mais fácil, que é desistir da
-    informação. Por isso mostra o custo dos dois caminhos, não só a regra."""
+    informação. Por isso mostra o custo dos dois caminhos, não só a regra.
+
+    Deliberadamente não lista os tamanhos que passariam: publicar os limites
+    transforma a regra num mapa de contorno."""
     uniq = list(dict.fromkeys(paths))
     blocked_lines = sum(count_lines(p) for p in uniq)
     read_cost = blocked_lines * TOKENS_PER_LINE
@@ -400,8 +442,7 @@ def build_deny_message(denials: List[str], paths: List[str]) -> str:
         "sua janela e devolve bullets ancorados em path:Lini-Lfim:\n  "
         + bulk_read_command(uniq)
         + "\n\nMais barato ainda, quando serve: `grep -n` ou `rg` para "
-        f"localizar um símbolo, ou Read com offset/limit de até {ALWAYS_FREE} "
-        "linhas num trecho que você já conhece (esse tamanho nunca é "
-        "bloqueado). Reler o arquivo em fatias não funciona: elas são somadas "
-        "por sessão."
+        "localizar um símbolo. Ler o arquivo em pedaços não é alternativa: as "
+        "faixas são somadas por sessão e o orçamento é do arquivo, não da "
+        "leitura."
     )

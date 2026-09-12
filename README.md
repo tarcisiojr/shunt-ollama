@@ -116,9 +116,27 @@ came through it, 80 lines at a time. Counting the window from the second read on
 Across the whole log the block rate went from 27% to 32%, and blocked tokens from roughly 78
 thousand to 91 thousand.
 
-**How to check this yourself.** From 0.4.0 on, every log line carries the plugin version, and
-`shunt-stats` compares versions side by side. The numbers above were produced by replaying real
-logs; the ones for your own usage come from `scripts/shunt-stats`.
+**What 0.5.0 fixed.** Three days of work across three projects, with the exempt bands in place,
+produced a 2% block rate and no delegations at all. Reconstructing the real ranges from session
+transcripts showed why: 29 files had 60% or more of their content in the context, several at
+100%, assembled from small reads. Nine of them were above the threshold, 2,150 lines that should
+have been stopped.
+
+The cause was the design, not evasion. The exempt tier of 25 lines was unlimited and never
+charged to anything, and it absorbed 41% of all reads. The session-start hook published the
+exempt sizes, so the cheapest path was also the documented one.
+
+0.5.0 removes every exempt band. The threshold became a per-file budget, the escape allowance is
+measured in lines, and the routing text no longer names a single limit:
+
+| Metric | 0.4.0 | 0.5.0 |
+|---|---|---|
+| Block rate | 5% | 48% |
+| Denials converted into a delegation | 0% | 71% |
+
+**How to check this yourself.** Every log line carries the plugin version, the ranges it asked
+for and the coverage reached so far, and `shunt-stats` turns that into a version comparison and
+a slicing report. The numbers above came from the log itself, not from reading transcripts.
 
 **Test suite.** 47 cases, built from the exact commands that earlier versions let through.
 
@@ -140,28 +158,34 @@ block is to try to route around it.
 
 ### Decision rules
 
-In `hooks/lib/shunt_common.py`:
+In `hooks/lib/shunt_common.py`. The threshold answers two questions: by total file size it
+decides whether the plugin applies at all, and when it does, it becomes that file's reading
+budget for the session.
 
-1. A read of up to `SHUNT_ALWAYS_FREE` (25) lines always passes and is never counted. This is
-   the escape valve that keeps surgical editing possible even after a file's running total has
-   been exhausted.
-2. The first `SHUNT_EDIT_FREE` (1) read of up to `SHUNT_EDIT_WINDOW` (80) lines per file also
-   passes free and uncounted. From the second one on, those reads join the running total.
-   Slicing a file into 80-line chunks used to bypass the plugin entirely.
-3. A read above `SHUNT_MIN_LINES` (250) is denied. The denial compares both costs, reading
-   directly versus delegating, and carries a ready-to-paste `bulk-read` command.
-4. **Anti-slicing.** The ranges read from each file are stored per session as a union of
-   intervals. Once the accumulated coverage passes the threshold, the next slice is denied.
-   Rereading the same range does not grow the total.
-5. Several files in a single command above `SHUNT_MAX_TOTAL_LINES` (3× the threshold) are denied
+1. A file of up to `SHUNT_MIN_LINES` (180) lines is **out of scope**. Delegating costs more than
+   reading it, so it never enters a budget. Logged as `small-file`.
+2. Above that, every read of the file consumes the budget. There is no exempt size and no free
+   first read. The ranges are stored per session as a union of intervals, so rereading the same
+   range does not grow the total, and splitting a read into pieces does not buy more lines.
+3. Once the budget is spent, `SHUNT_ESCAPE_BUDGET` (80) extra lines remain available in reads of
+   up to `SHUNT_EDIT_WINDOW` (80) lines each, so editing a slice the local model pointed at
+   stays possible. Measured in lines rather than in number of reads: counting reads allowed
+   three of 80, which handed back 300-line files whole.
+4. Several files in a single command above `SHUNT_MAX_TOTAL_LINES` (3× the threshold) are denied
    as well.
-6. If Ollama does not answer, **nothing is blocked**. The probe is cached for two minutes.
+5. If Ollama does not answer, **nothing is blocked**. The probe is cached for two minutes.
    Blocking with nowhere to delegate would only stall Claude.
 
-The threshold is floored at twice the edit window. A threshold sitting right above the window
-leaves a sliver of countable reads and produces denials worth almost no savings. Setting
-`SHUNT_MIN_LINES=100` with the default window yields an effective 160, logged as
-`threshold-floor` at session start.
+The threshold is floored at twice the edit window, logged as `threshold-floor` at session start.
+
+Protection is weaker in proportion for files just above the threshold: a 300-line file with a
+budget of 180 and an escape of 80 can still reach 87% coverage. The real gain is on large files,
+where 260 lines out of 4,000 is 6%.
+
+The session-start hook states the rule without publishing the numbers. The earlier version
+listed the exempt sizes, and the log showed the result: 41% of reads landed exactly inside the
+exempt band, and files above the threshold reached the context whole, assembled from slices. A
+published limit is a map of the way around it.
 
 ### What the parser recognizes
 
@@ -262,10 +286,9 @@ few lines, so verify exact values before an `Edit`.
 | `SHUNT_TEMPERATURE` | `0.2` | same as the original |
 | `SHUNT_NUM_CTX` | `32768` | context window; Ollama starts at 4096 if unset, and then truncates silently |
 | `SHUNT_KEEP_ALIVE` | `30m` | keeps the model loaded between calls |
-| `SHUNT_MIN_LINES` | `250` | blocking threshold, floored at `2 × EDIT_WINDOW` |
-| `SHUNT_EDIT_WINDOW` | `80` | what counts as an editing read |
-| `SHUNT_EDIT_FREE` | `1` | how many editing reads per file pass without being counted |
-| `SHUNT_ALWAYS_FREE` | `25` | reads up to this size are never counted and never denied |
+| `SHUNT_MIN_LINES` | `180` | out-of-scope size and per-file reading budget, floored at `2 × EDIT_WINDOW` |
+| `SHUNT_EDIT_WINDOW` | `80` | largest single editing read |
+| `SHUNT_ESCAPE_BUDGET` | `80` | extra lines for editing reads after the budget is spent |
 | `SHUNT_MAX_TOTAL_LINES` | `3 × MIN_LINES` | sum across several files in one command |
 | `SHUNT_TIMEOUT_SECONDS` | `180` | `curl` timeout |
 | `SHUNT_HOOK_LOG` | `~/.claude/shunt.log` | TSV decision log |
@@ -277,7 +300,8 @@ few lines, so verify exact values before an `Edit`.
 ```bash
 scripts/shunt-stats
 scripts/shunt-stats --since 2026-09-01
-scripts/shunt-stats --version 0.4.0
+scripts/shunt-stats --version 0.5.0
+scripts/shunt-stats --file install.sh --top 20
 ```
 
 The first section compares plugin versions, so you can tell whether a change actually worked
@@ -297,10 +321,25 @@ share of denials followed by a delegation within ten minutes, which is the numbe
 whether the plugin is being used as a detour or merely as a brake. A sample under 30 events
 gets an explicit warning, and conversion under 20% gets one too.
 
+A second section reports how much of each file reached the context, and flags slicing:
+
+```text
+Cobertura por arquivo e sessão (top 10 por percentual)
+   coberto   total     %  leituras  fatias  arquivo
+       240     299   80%         4       3  mia-cli/install.sh
+       266    4289    6%        11      11  claude-local/claude-local.sh
+
+  Fatiamento: 1 arquivo(s) com 50%+ de cobertura montada em 3+ leituras de até 80 linhas
+```
+
+`fatias` counts reads of up to 80 lines. A file with high coverage assembled almost entirely
+from slices is the signature of reading around the budget, and `--file` narrows either section
+to one path.
+
 The rest shows decisions per tool, most-blocked files, and tokens delegated to Ollama against
 tokens returned to Claude.
 
-The log is TSV with nine columns:
+The log is TSV with eleven columns:
 
 | # | Column | Content |
 |---|---|---|
@@ -313,17 +352,24 @@ The log is TSV with nine columns:
 | 7 | total | lines in the file |
 | 8 | effective | lines that would enter the context |
 | 9 | version | plugin version that made the decision |
+| 10 | ranges | the line ranges this read asked for, e.g. `1-80` or `10-25,60-90` |
+| 11 | covered | total lines of the file already read in this session |
 
-Lines written before 0.4.0 have eight columns. `shunt-stats` still reads them and groups them as
-`<=0.3.0`, which keeps the baseline for comparison. During an upgrade both versions appear in
-the same log: sessions already open keep running the old hooks until restarted.
+Columns 10 and 11 exist so that diagnosing slicing is a query over the log rather than a
+reconstruction from session transcripts. Lines written before 0.4.0 have eight columns and ones
+from 0.4.0 have nine; `shunt-stats` reads all three shapes and groups the oldest as `<=0.3.0`,
+which keeps the baseline for comparison. During an upgrade both versions appear in the same log:
+sessions already open keep running the old hooks until restarted.
 
-Reasons: `always-free` (≤ 25 lines, never counted), `edit-window` (first editing read of a file,
-free), `window-counted` (a later editing read, added to the total), `counted` (a mid-size read,
-added to the total), `single-read` (denied on size), `cumulative` (denied on accumulated
-slices), `multi-file` (denied on the sum), `ollama-off` (allowed because no model is available),
-`threshold-floor` (the configured threshold was raised to the floor), plus `heredoc` and
-`unresolved:$VAR` (not analyzable).
+Reasons: `small-file` (file under the threshold, out of scope), `counted` (charged to the
+budget), `escape` (charged to the escape balance after the budget was spent), `single-read`
+(denied on size), `cumulative` (denied because the budget is spent), `escape-exhausted` (denied
+because the escape balance is spent too), `multi-file` (denied on the sum), `ollama-off`
+(allowed because no model is available), `threshold-floor` (the configured threshold was raised
+to the floor), plus `heredoc` and `unresolved:$VAR` (not analyzable).
+
+Earlier versions also wrote `always-free`, `edit-window` and `window-counted`, from the exempt
+bands that 0.5.0 removed.
 
 Per-session state lives in `$TMPDIR/shunt-state-<session_id>.json`. Deleting it resets the
 running totals.
@@ -355,6 +401,12 @@ Code comments and inline documentation are in Brazilian Portuguese.
 
 ## Changelog
 
+- **0.5.0** — the threshold became a per-file reading budget and every exempt band is gone,
+  closing the slicing route that let whole files reach the context. The escape allowance after
+  the budget is spent is measured in lines. The routing text stops publishing the limits. The
+  log gains the requested ranges and the accumulated coverage, and `shunt-stats` reports
+  coverage and flags slicing, so diagnosing this no longer requires reading transcripts.
+  Default threshold drops from 250 to 180.
 - **0.4.0** — every log line carries the plugin version as a ninth column, and `shunt-stats`
   compares versions side by side, so the effect of a change is measurable instead of inferred.
   Eight-column lines from earlier versions are still read and grouped as `<=0.3.0`.
