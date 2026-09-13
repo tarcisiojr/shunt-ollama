@@ -114,7 +114,7 @@ Three hooks, one delegation script, one metrics script.
 | Piece | Role |
 |---|---|
 | `hooks/check-file-size` | `PreToolUse` on `Read`. Charges the bytes the requested lines actually carry. |
-| `hooks/check-bash-read` | `PreToolUse` on `Bash` and on MCP tools that execute shell. Parses `cat`, `head`, `tail`, `sed -n`, `awk`, `nl`, `bat`, `rtk read`. |
+| `hooks/check-bash-read` | `PreToolUse` on `Bash` and on any `mcp__*` tool: the shell command is looked up in `tool_input` by field name (`command`, `commands`, `cmd`, `script`, `code` with a shell `language`). Parses `cat`, `head`, `tail`, `sed -n`, `awk`, `nl`, `bat`, `rtk read`. |
 | `hooks/session-start` | `SessionStart`. Injects the routing rule and records whether Ollama is up. |
 | `scripts/bulk-read` | Builds the message, calls Ollama, prints the answer. |
 | `scripts/shunt-stats` | Summarizes the log: comparison by version and by model, coverage, slicing, delegated tokens. |
@@ -389,6 +389,8 @@ few lines, so verify exact values before an `Edit`.
 | `SHUNT_MIN_LINES` | unset | legacy: converted at 36 bytes per line when `SHUNT_MIN_BYTES` is absent |
 | `SHUNT_MAX_TOTAL_BYTES` | `3 × MIN_BYTES` | sum across several files in one command |
 | `SHUNT_WARN_RATIO` | `50` | warns when the answer exceeds this share of the content read |
+| `SHUNT_EXEMPT_TOOLS` | empty | name fragments of MCP tools whose output does not enter the context (a sandbox returning only a summary); the read is allowed and logged as `exempt-tool` |
+| `SHUNT_SHELL_KEYS` | empty | extra `tool_input` field names to look for a shell command in, for MCP tools off the common shape |
 | `SHUNT_TIMEOUT_SECONDS` | unset | fixed timeout in seconds; overrides the calculated one |
 | `SHUNT_TIMEOUT_SLACK` | `300` | % of the predicted time allowed before giving up |
 | `SHUNT_TIMEOUT_MIN` | `60` | floor of the calculated timeout |
@@ -553,6 +555,12 @@ language of the routing text the hooks inject.
 
 ## Changelog
 
+- **0.14.0** — the shell hook stops naming context-mode and intercepts any `mcp__*` tool,
+  looking up the command in `tool_input` by field name, because every user has their own tools.
+  `SHUNT_EXEMPT_TOOLS` exempts the ones that return only a summary, logged as `exempt-tool`, and
+  `SHUNT_SHELL_KEYS` adds fields. The report shows conversion per tool, which is the data for
+  deciding an exemption: in the first real session, half of the denials came from inside a
+  sandbox.
 - **0.13.1** — conversion and `--follow` pair a delegation with a denial by file path, and each
   delegation serves one denial only. The previous time-only rule reported sixteen denials as
   converted by a single one-file delegation, hiding that Claude gave up on the other fourteen.

@@ -22,7 +22,9 @@ atendidas por uma chamada ao modelo local: a do mesmo arquivo em até dez minuto
 negativa mais recente na janela, uma por delegação. Conversão alta significa que o
 plugin está desviando a leitura; conversão baixa significa que ele só está freando, e o Claude
 está desistindo da informação em vez de delegar. Taxa de bloqueio alta com conversão zero é o
-pior cenário, não o melhor.
+pior cenário, não o melhor. Abaixo da conversão geral sai a conversão **por ferramenta**: uma
+ferramenta MCP com muitas negativas e conversão zero pode ser uma sandbox que devolve só resumo,
+e aí a leitura não custava contexto; nesse caso a isenção via `SHUNT_EXEMPT_TOOLS` é a saída.
 
 **Cobertura por arquivo e sessão.** Quanto de cada arquivo chegou ao contexto, em bytes, que é
 a unidade do orçamento. A coluna `fatias` conta leituras pequenas. Um arquivo grande com

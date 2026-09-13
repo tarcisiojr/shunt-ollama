@@ -92,15 +92,42 @@ def pick_deny(pending, delegation):
     return window[-1] if window else None
 
 
-def conversions(denies, bulk_ok):
+def converted_denies(denies, bulk_ok):
+    """As negativas atendidas, uma por delegação, na ordem do log."""
     pending = sorted(denies, key=lambda d: d["ts"])
-    converted = 0
+    converted = []
     for b in sorted(bulk_ok, key=lambda r: r["ts"]):
         d = pick_deny(pending, b)
         if d is not None:
             pending.remove(d)
-            converted += 1
+            converted.append(d)
     return converted
+
+
+def conversions(denies, bulk_ok):
+    return len(converted_denies(denies, bulk_ok))
+
+
+def print_conversion_by_tool(denies, bulk_ok):
+    """Conversão por ferramenta que sofreu a negativa.
+
+    Cada usuário tem as suas ferramentas MCP, e uma sandbox que devolve só
+    resumo (context-mode, por exemplo) pode estar sendo bloqueada sem
+    necessidade; é aqui que isso aparece, ferramenta a ferramenta.
+    """
+    if not denies:
+        return
+    converted = converted_denies(denies, bulk_ok)
+    by_tool = collections.defaultdict(lambda: [0, 0])
+    for d in denies:
+        by_tool[d["tool"]][0] += 1
+    for d in converted:
+        by_tool[d["tool"]][1] += 1
+    if len(by_tool) < 2:
+        return
+    print("  por ferramenta:")
+    for tool, (total, conv) in sorted(by_tool.items(), key=lambda x: -x[1][0]):
+        print(f"    {conv:>3}/{total:<3} ({100 * conv / total:>3.0f}%)  {tool}")
 
 
 def summarize(rows):
@@ -479,6 +506,8 @@ def main():
         pct = 100 * overall["converted"] / len(denies)
         print(f"\nConversão: {overall['converted']}/{len(denies)} denies "
               f"({pct:.0f}%) atendidos por um bulk-read em até 10 min")
+        print_conversion_by_tool(denies, [r for r in rows if r["tool"] == "bulk-read"
+                                          and r["decision"] == "ok"])
         if pct < 20:
             print("  Conversão baixa: os bloqueios estão economizando contexto, "
                   "mas o Claude está desistindo da informação em vez de delegar.")

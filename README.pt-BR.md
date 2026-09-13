@@ -115,7 +115,7 @@ Três hooks, um script de delegação e um de métricas.
 | Peça | Papel |
 |---|---|
 | `hooks/check-file-size` | `PreToolUse` em `Read`. Debita os bytes que as linhas pedidas realmente carregam. |
-| `hooks/check-bash-read` | `PreToolUse` em `Bash` e em ferramentas MCP que executam shell. Analisa `cat`, `head`, `tail`, `sed -n`, `awk`, `nl`, `bat`, `rtk read`. |
+| `hooks/check-bash-read` | `PreToolUse` em `Bash` e em qualquer ferramenta `mcp__*`: o comando shell é procurado no `tool_input` pelo nome do campo (`command`, `commands`, `cmd`, `script`, `code` com `language` shell). Analisa `cat`, `head`, `tail`, `sed -n`, `awk`, `nl`, `bat`, `rtk read`. |
 | `hooks/session-start` | `SessionStart`. Injeta a regra de roteamento e registra se o Ollama está de pé. |
 | `scripts/bulk-read` | Monta a mensagem, chama o Ollama, imprime a resposta. |
 | `scripts/shunt-stats` | Resume o log: comparação por versão e por modelo, cobertura, fatiamento, tokens delegados. |
@@ -393,6 +393,8 @@ errar alguns números de linha, então confira valores exatos antes de um `Edit`
 | `SHUNT_MIN_LINES` | vazio | legado: convertido a 36 bytes por linha quando `SHUNT_MIN_BYTES` falta |
 | `SHUNT_MAX_TOTAL_BYTES` | `3 × MIN_BYTES` | soma de vários arquivos num só comando |
 | `SHUNT_WARN_RATIO` | `50` | avisa quando a resposta passa desta fração do conteúdo lido |
+| `SHUNT_EXEMPT_TOOLS` | vazio | trechos de nome de ferramentas MCP cuja saída não entra no contexto (sandbox que devolve só resumo); a leitura é liberada e registrada como `exempt-tool` |
+| `SHUNT_SHELL_KEYS` | vazio | nomes de campo extras do `tool_input` onde procurar comando shell, para ferramentas MCP fora do padrão |
 | `SHUNT_TIMEOUT_SECONDS` | vazio | timeout fixo em segundos; sobrepõe o calculado |
 | `SHUNT_TIMEOUT_SLACK` | `300` | % do tempo previsto admitido antes de desistir |
 | `SHUNT_TIMEOUT_MIN` | `60` | piso do timeout calculado |
@@ -558,6 +560,12 @@ também o idioma do texto de roteamento que os hooks injetam.
 
 ## Changelog
 
+- **0.14.0** — o hook de shell deixa de nomear o context-mode e passa a interceptar qualquer
+  ferramenta `mcp__*`, procurando o comando no `tool_input` pelo nome do campo, porque cada
+  usuário tem as suas ferramentas. `SHUNT_EXEMPT_TOOLS` isenta as que devolvem só resumo, com
+  registro `exempt-tool`, e `SHUNT_SHELL_KEYS` acrescenta campos. O relatório mostra a conversão
+  por ferramenta, que é o dado para decidir a isenção: na primeira sessão real, metade das
+  negativas veio de dentro de uma sandbox.
 - **0.13.1** — a conversão e o `--follow` pareiam delegação com negativa pelo caminho do arquivo,
   e cada delegação atende uma negativa só. A regra anterior, só por tempo, deu dezesseis negativas
   como convertidas por uma delegação de um arquivo, e escondeu que o Claude desistiu das outras

@@ -8,7 +8,7 @@
         ]
       },
       {
-        "matcher": "Bash|mcp__(plugin_)?context-mode(_context-mode)?__ctx_(batch_execute|execute)",
+        "matcher": "Bash|mcp__.*",
         "hooks": [
           { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/check-bash-read" }
         ]

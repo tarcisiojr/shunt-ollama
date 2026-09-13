@@ -439,6 +439,53 @@ class HookEndToEndTest(unittest.TestCase):
         self.assertEqual(out.stdout.strip(), "0.9.1")
 
 
+class McpShellToolsTest(HookEndToEndTest):
+    """Qualquer ferramenta mcp__* com comando shell é analisada; sem ele, liberada.
+
+    Reaproveita os helpers do teste de ponta a ponta: mesmo JSON de entrada,
+    mesmo log."""
+
+    def test_generic_mcp_tool_with_command_is_denied(self):
+        out = self.run_hook("check-bash-read", "mcp__outro__run_shell",
+                            {"command": f"cat {self.big}"})
+        self.assertEqual(self.decision(out), "deny")
+
+    def test_nested_commands_list_is_found(self):
+        out = self.run_hook("check-bash-read", "mcp__outro__batch",
+                            {"job": {"commands": [{"cmd": f"cat {self.big}"}]}})
+        self.assertEqual(self.decision(out), "deny")
+
+    def test_python_code_is_not_shell(self):
+        """Um `cat` dentro de uma string Python não lê arquivo nenhum."""
+        out = self.run_hook("check-bash-read", "mcp__outro__execute",
+                            {"language": "python", "code": f"print('cat {self.big}')"})
+        self.assertEqual(self.decision(out), "allow")
+
+    def test_tool_without_shell_fields_is_allowed_untouched(self):
+        out = self.run_hook("check-bash-read", "mcp__outro__search",
+                            {"query": f"cat {self.big}", "limit": 3})
+        self.assertEqual(self.decision(out), "allow")
+        # Nada a registrar: o log nem chega a ser criado.
+        self.assertFalse(os.path.exists(self.env["SHUNT_HOOK_LOG"]))
+
+    def test_extra_shell_key_from_env(self):
+        env = {**self.env, "SHUNT_SHELL_KEYS": "input"}
+        out = self.run_hook("check-bash-read", "mcp__outro__term",
+                            {"input": f"cat {self.big}"}, env=env)
+        self.assertEqual(self.decision(out), "deny")
+
+    def test_exempt_tool_is_allowed_and_logged(self):
+        env = {**self.env, "SHUNT_EXEMPT_TOOLS": "ctx_batch_execute, outra_sandbox"}
+        out = self.run_hook("check-bash-read", "mcp__context-mode__ctx_batch_execute",
+                            {"commands": [{"command": f"cat {self.big}"}]}, env=env)
+        self.assertEqual(self.decision(out), "allow")
+        self.assertEqual(self.reasons_logged(), ["exempt-tool"])
+        # A mesma leitura sem a isenção segue negada.
+        out = self.run_hook("check-bash-read", "mcp__context-mode__ctx_batch_execute",
+                            {"commands": [{"command": f"cat {self.big}"}]})
+        self.assertEqual(self.decision(out), "deny")
+
+
 class StatsTest(unittest.TestCase):
     """O agregador precisa ler o formato antigo de 8 colunas junto do novo de
     9, senão a comparação entre versões perde a linha de base."""
@@ -509,10 +556,15 @@ class StatsTest(unittest.TestCase):
             fh.write("2026-09-13T08:49:00\t-\tbulk-read\tok\t"
                      "model=m;files=1;pin=3000;pout=300;dur=40;ratio=10"
                      "\t/f1.py\t900\t0\t0.13.1\t-\t0\n")
+            fh.write("2026-09-13T08:47:30\ts1\tmcp__x__run\tdeny\tsingle-read\t/g.py"
+                     "\t900\t900\t0.14.0\t1-900\t0\t9000\t9000\n")
         out = subprocess.run(
             [os.path.join(ROOT, "scripts", "shunt-stats"), "--log", log],
             capture_output=True, text=True, check=True).stdout
-        self.assertIn("Conversão: 1/3 denies (33%)", out)
+        self.assertIn("Conversão: 1/4 denies (25%)", out)
+        self.assertIn("por ferramenta:", out)
+        self.assertIn("1/3   ( 33%)  Read", out)
+        self.assertIn("0/1   (  0%)  mcp__x__run", out)
 
     def test_small_sample_warning(self):
         self.assertIn("amostra pequena", self.run_stats())

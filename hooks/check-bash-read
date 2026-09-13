@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
-"""Hook PreToolUse para Bash e para as ferramentas de shell do context-mode.
+"""Hook PreToolUse para Bash e para qualquer ferramenta MCP que execute shell.
 
 Analisa cada comando (cat, head, tail, sed -n, awk, rtk read...) e calcula
 quantas linhas de cada arquivo entrariam no contexto. Cobre `cd X && cat f`,
-`2>/dev/null`, pipes com head/sed e os `commands[]` do ctx_batch_execute.
+`2>/dev/null` e pipes com head/sed.
+
+O matcher pega toda ferramenta `mcp__*`, porque cada usuário tem as suas; o
+comando shell é procurado no tool_input pelo nome do campo (`command`,
+`commands`, `cmd`, `script`, e `code` quando `language` é shell), em qualquer
+profundidade. Ferramenta sem esses campos é liberada sem análise.
+SHUNT_SHELL_KEYS acrescenta nomes de campo; SHUNT_EXEMPT_TOOLS lista
+ferramentas cuja saída não entra no contexto (sandbox que só devolve resumo),
+liberadas mesmo com leitura grande, e registradas como `exempt-tool`.
 """
 
 import os
@@ -16,18 +24,55 @@ import shunt_common as sc  # noqa: E402
 from parse_reads import parse_reads  # noqa: E402
 
 
+SHELL_LANGS = ("shell", "bash", "sh", "zsh")
+SHELL_KEYS = {"command", "commands", "cmd", "script"}
+SHELL_KEYS.update(k.strip() for k in os.environ.get("SHUNT_SHELL_KEYS", "").split(",")
+                  if k.strip())
+EXEMPT_TOOLS = [k.strip() for k in os.environ.get("SHUNT_EXEMPT_TOOLS", "").split(",")
+                if k.strip()]
+MAX_DEPTH = 4
+
+
+def is_exempt(tool_name: str) -> bool:
+    """Ferramenta listada em SHUNT_EXEMPT_TOOLS, por trecho do nome."""
+    return any(part in tool_name for part in EXEMPT_TOOLS)
+
+
+def shell_strings(node, depth: int = 0) -> List[str]:
+    """Strings de shell dentro de um tool_input, em qualquer profundidade.
+
+    `code` só conta quando um `language` irmão diz que é shell: em Python ou
+    JavaScript um `cat` dentro de uma string não lê arquivo nenhum.
+    """
+    if depth > MAX_DEPTH:
+        return []
+    found: List[str] = []
+    if isinstance(node, dict):
+        lang = str(node.get("language") or "").lower()
+        for key, value in node.items():
+            if key in SHELL_KEYS or (key == "code" and lang in SHELL_LANGS):
+                if isinstance(value, str) and value.strip():
+                    found.append(value)
+                else:
+                    found.extend(shell_strings(value, depth + 1))
+            elif isinstance(value, (dict, list)):
+                found.extend(shell_strings(value, depth + 1))
+    elif isinstance(node, list):
+        for item in node:
+            if isinstance(item, str) and item.strip():
+                found.append(item)
+            else:
+                found.extend(shell_strings(item, depth + 1))
+    return found
+
+
 def collect_commands(tool_name: str, tool_input: dict) -> List[str]:
     """Extrai os comandos shell conforme a ferramenta interceptada."""
     if tool_name == "Bash":
         cmd = tool_input.get("command")
         return [cmd] if cmd else []
-    if tool_name.endswith("ctx_batch_execute"):
-        return [c.get("command", "") for c in tool_input.get("commands") or []
-                if isinstance(c, dict) and c.get("command")]
-    if tool_name.endswith("ctx_execute"):
-        lang = (tool_input.get("language") or "").lower()
-        code = tool_input.get("code") or ""
-        return [code] if code and lang in ("shell", "bash", "sh", "zsh") else []
+    if tool_name.startswith("mcp__"):
+        return shell_strings(tool_input)
     return []
 
 
@@ -40,6 +85,11 @@ def main() -> None:
 
     commands = collect_commands(tool_name, tool_input)
     if not commands:
+        sc.allow()
+    if is_exempt(tool_name):
+        # A saída dessa ferramenta não entra no contexto; fica só o registro,
+        # para o shunt-stats mostrar o que passou por aqui sem ser contado.
+        sc.log(session, tool_name, "allow", "exempt-tool")
         sc.allow()
 
     requests = {}
