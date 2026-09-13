@@ -248,6 +248,12 @@ lento.
 Enquanto não há histórico, a taxa assumida é baixa de propósito, o que compra um timeout
 generoso na primeira chamada. A segunda já é medida.
 
+**Aumentar o `SHUNT_NUM_CTX` não é a saída para arquivo grande.** Medido aqui, um prompt de
+~48.000 tokens com `num_ctx=65536` foi processado inteiro, mas levou 1.328 segundos, contra 78
+segundos de uma chamada equivalente em 32.768. O tempo de processamento cresce muito mais que
+linearmente com a janela, então fatiar sempre ganha de alargar. Só aumente a janela se uma
+unidade indivisível não couber.
+
 ### O que o parser reconhece
 
 Cobre `cd dir && cat arquivo`, `2>/dev/null` e `2>&1`, `&&`/`;`/`||`/nova linha, pipes
@@ -519,6 +525,9 @@ também o idioma do texto de roteamento que os hooks injetam.
 
 ## Changelog
 
+- **0.10.1** — documenta por que alargar o `SHUNT_NUM_CTX` não ajuda (um prompt de 48 mil tokens
+  em 65536 levou 1.328s contra 78s de uma chamada equivalente em 32768) e remove duas funções
+  que a versão anterior deixou mortas.
 - **0.10.0** — corrige um truncamento silencioso. O Ollama descarta metade do contexto quando um
   prompt estoura, sem erro algum, e as partes eram dimensionadas em 80% do `num_ctx` assumindo
   4 bytes por token, o que caía logo acima do teto real. Delegações grandes vinham respondendo

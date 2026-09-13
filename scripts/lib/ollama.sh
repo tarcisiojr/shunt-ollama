@@ -12,6 +12,12 @@ SHUNT_TEMPERATURE="${SHUNT_TEMPERATURE:-0.2}"
 # Janela de contexto do modelo. O Ollama sobe com 4096 se você não pedir
 # outro valor, e aí um arquivo grande é cortado sem aviso.
 #
+# Aumentar este valor não é a saída para arquivo grande: medido nesta
+# máquina, um prompt de ~48000 tokens com num_ctx=65536 foi processado
+# inteiro, mas levou 1328s contra 78s de uma chamada equivalente em 32768. O
+# tempo cresce muito mais que linearmente com a janela, então fatiar é sempre
+# mais rápido que alargar.
+#
 # ATENÇÃO, medido neste plugin com num_ctx=32768: um prompt de até ~27900
 # tokens é processado inteiro, e a partir de ~30000 o prompt_eval_count cai
 # para exatamente 16387, ou seja num_ctx/2. O llama.cpp descarta metade do
@@ -128,20 +134,6 @@ shunt_log_line() {
 # Tokens que o Ollama aceita de prompt, na prática.
 shunt_prompt_limit() {
   printf '%s' $(( SHUNT_NUM_CTX * SHUNT_PROMPT_FRACTION / 100 ))
-}
-
-# Razão bytes/token, em décimos, aprendida nas chamadas já feitas com este
-# modelo. Mistura tipos de conteúdo, então não serve para dimensionar partes;
-# serve para relatar e para estimar custo na mensagem de bloqueio.
-shunt_learned_ratio() {
-  local v
-  [ -r "$SHUNT_CALIBRATION" ] || { printf '0'; return; }
-  v=$(jq -r --arg m "$SHUNT_MODEL" '
-        (.models[$m].samples // [])
-        | map(select(.tokens > 0 and (.bytes // 0) > 0) | .bytes / .tokens * 10)
-        | sort | if length == 0 then 0 else .[length / 2 | floor] end | floor
-      ' "$SHUNT_CALIBRATION" 2>/dev/null) || v=0
-  printf '%s' "${v:-0}"
 }
 
 # Bytes de conteúdo por parte, para que o prompt montado caiba no limite real.

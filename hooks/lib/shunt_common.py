@@ -194,17 +194,6 @@ def format_ranges(ranges: Iterable[Range]) -> str:
     return out or "-"
 
 
-def parse_ranges(text: str) -> List[Range]:
-    out: List[Range] = []
-    if not text or text == "-":
-        return out
-    for part in text.split(","):
-        a, _, b = part.partition("-")
-        if a.isdigit() and b.isdigit():
-            out.append((int(a), int(b)))
-    return out
-
-
 def log(session: str, tool: str, decision: str, reason: str,
         path: str = "", total: int = 0, effective: int = 0,
         ranges: Optional[Iterable[Range]] = None, covered: int = 0,

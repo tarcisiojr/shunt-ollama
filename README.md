@@ -245,6 +245,12 @@ collapses. Learning that would shrink the timeout right before a fresh, slow pro
 Until there is history, the assumed rate is deliberately low, which buys a generous timeout on
 the first call. The second call is already measured.
 
+**Raising `SHUNT_NUM_CTX` is not the answer for a large file.** Measured here, a ~48,000-token
+prompt at `num_ctx=65536` was processed whole but took 1,328 seconds, against 78 seconds for an
+equivalent call at 32,768. Processing time grows far faster than linearly with the window, so
+splitting into parts always beats widening it. Raise the window only if a single indivisible
+unit does not fit.
+
 ### What the parser recognizes
 
 It covers `cd dir && cat file`, `2>/dev/null` and `2>&1`, `&&`/`;`/`||`/newline separators,
@@ -516,6 +522,9 @@ language of the routing text the hooks inject.
 
 ## Changelog
 
+- **0.10.1** — documents why widening `SHUNT_NUM_CTX` does not help (a 48k-token prompt at
+  65536 took 1,328s against 78s for an equivalent call at 32768) and removes two functions left
+  dead by the previous release.
 - **0.10.0** — fixes a silent truncation. Ollama discards half the context when a prompt
   overflows, without an error, and chunks were being sized at 80% of `num_ctx` using a assumed
   4 bytes per token, which landed just above the real ceiling. Large delegations were answering
