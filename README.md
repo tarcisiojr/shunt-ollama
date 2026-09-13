@@ -416,7 +416,15 @@ scripts/shunt-stats
 scripts/shunt-stats --since 2026-09-01
 scripts/shunt-stats --version 0.5.0
 scripts/shunt-stats --file install.sh --top 20
+scripts/shunt-stats --follow          # live: denies, delegations and the pairing between them
 ```
+
+`--follow` tails the log live, like a `tail -f` that only shows what counts: every deny with the
+bytes kept out of the context, every delegation with `pin`, `pout` and ratio, and the pairing
+between the two. A delegation within ten minutes of a deny comes out marked with its origin and
+the wait; a deny that passes ten minutes without one comes out as "no delegation", the sign
+that Claude gave up. `--all` also shows `allow` and `skip`, to hunt slicing and blind spots. It
+is the screen to keep open while using Claude in another window.
 
 The first section compares plugin versions, so you can tell whether a change actually worked
 instead of guessing from timestamps:
@@ -544,6 +552,10 @@ language of the routing text the hooks inject.
 
 ## Changelog
 
+- **0.13.0** — `shunt-stats --follow` tails the log live and pairs a deny with its delegation,
+  marking the wait between the two and the deny that went ten minutes without one. `--all`
+  includes `allow` and `skip`. The pairing logic lives in a class separate from the read loop,
+  tested without waiting out the window.
 - **0.12.0** — MinionS-style decomposition for broad questions. `--questions` sends numbered
   subtasks in a single prompt per part, the model abstains per subtask and the abstentions fold
   into one count line; `--dry-run` prints the prompt without calling Ollama, and the log gains

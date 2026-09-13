@@ -9,6 +9,7 @@ ${CLAUDE_PLUGIN_ROOT}/scripts/shunt-stats --since 2026-09-01   # a partir de uma
 ${CLAUDE_PLUGIN_ROOT}/scripts/shunt-stats --version 0.6.0      # uma versão do plugin
 ${CLAUDE_PLUGIN_ROOT}/scripts/shunt-stats --file install.sh    # um arquivo
 ${CLAUDE_PLUGIN_ROOT}/scripts/shunt-stats --top 20             # mais linhas por seção
+${CLAUDE_PLUGIN_ROOT}/scripts/shunt-stats --follow [--all]     # ao vivo: negativas, delegações, pareamento
 ```
 
 ## Como ler a saída
@@ -35,6 +36,14 @@ são comandos que o parser não consegue analisar, então são pontos cegos, nã
 **bulk-read.** Tokens que foram para o Ollama contra tokens devolvidos ao Claude, e a resposta
 como porcentagem do conteúdo lido. Acima de 50% a delegação rendeu pouco, e acima de 100% não
 houve economia alguma: a causa quase sempre é pergunta ampla em vez de específica.
+
+## Ao vivo
+
+`--follow` é um `tail -f` filtrado: imprime cada negativa com os bytes que ficaram fora, cada
+delegação com `pin`, `pout` e razão, e pareia as duas quando a delegação vem em até dez minutos.
+Negativa que passa dos dez minutos sem delegação sai como "sem delegação": o Claude desistiu.
+Não rode isso de dentro de uma sessão do Claude, porque bloqueia até Ctrl-C; sugira ao usuário
+abrir num terminal ao lado. `--all` acrescenta `allow` e `skip` para investigar fatiamento.
 
 ## Ao relatar para o usuário
 

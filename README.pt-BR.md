@@ -421,7 +421,15 @@ scripts/shunt-stats
 scripts/shunt-stats --since 2026-09-01
 scripts/shunt-stats --version 0.5.0
 scripts/shunt-stats --file install.sh --top 20
+scripts/shunt-stats --follow          # ao vivo: negativas, delegações e o pareamento entre elas
 ```
+
+`--follow` acompanha o log ao vivo, como um `tail -f` que só mostra o que conta: cada negativa
+com os bytes que ficaram fora do contexto, cada delegação com `pin`, `pout` e razão, e o
+pareamento entre as duas. Uma delegação até dez minutos depois de uma negativa sai marcada
+com a origem e a espera; uma negativa que passa dos dez minutos sem delegação sai como "sem
+delegação", que é o sinal de que o Claude desistiu. `--all` mostra também `allow` e `skip`, para
+caçar fatiamento e pontos cegos. É a tela para deixar aberta enquanto usa o Claude noutra janela.
 
 A primeira seção compara versões do plugin, para você saber se uma mudança realmente funcionou
 em vez de adivinhar pelo timestamp:
@@ -549,6 +557,10 @@ também o idioma do texto de roteamento que os hooks injetam.
 
 ## Changelog
 
+- **0.13.0** — `shunt-stats --follow` acompanha o log ao vivo e pareia negativa com delegação,
+  marcando a espera entre as duas e a negativa que passou dez minutos sem delegação. `--all`
+  inclui `allow` e `skip`. A lógica de pareamento vive numa classe separada do laço de leitura,
+  testada sem esperar a janela.
 - **0.12.0** — decomposição estilo MinionS para pergunta ampla. `--questions` manda subtarefas
   numeradas num único prompt por parte, o modelo se abstém por subtarefa e as abstenções viram
   uma linha de contagem; `--dry-run` mostra o prompt sem chamar o Ollama, e o log ganha

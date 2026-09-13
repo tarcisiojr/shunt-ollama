@@ -8,6 +8,7 @@ arquivo chegou ao contexto (cobertura) e se isso aconteceu em fatias pequenas
 (fatiamento).
 
 Uso: shunt-stats [--log CAMINHO] [--since AAAA-MM-DD] [--version 0.5.0] [--model NOME]
+                 [--follow [--all]]
                  [--top N] [--file TRECHO]
 """
 
@@ -17,6 +18,7 @@ import datetime as dt
 import statistics
 import os
 import sys
+import time
 
 DEFAULT_LOG = os.environ.get("SHUNT_HOOK_LOG") or os.path.expanduser(
     "~/.claude/shunt.log")
@@ -200,6 +202,99 @@ def print_subtask_split(rows):
           "sem decomposição")
 
 
+def fmt_bytes(n):
+    return f"{n / 1024:.1f} KB" if n else "-"
+
+
+class Follower:
+    """Pareia negativas com delegações à medida que as linhas chegam.
+
+    Separado do laço de leitura para ser testável sem esperar dez minutos:
+    feed() recebe uma linha parseada e tick() o relógio, e os dois devolvem
+    as linhas a imprimir. Uma negativa vira "sem delegação" quando a janela
+    de conversão passa sem um bulk-read, que é o sinal de que o Claude
+    desistiu da informação em vez de delegar.
+    """
+
+    def __init__(self, show_all=False):
+        self.show_all = show_all
+        self.pending = []   # negativas ainda sem delegação, em ordem
+
+    @staticmethod
+    def clock(row):
+        return row["ts"].strftime("%H:%M:%S")
+
+    def feed(self, row):
+        out = []
+        if row["tool"] == "bulk-read":
+            out.append(self._delegation(row))
+        elif row["decision"] == "deny":
+            self.pending.append(row)
+            out.append(f"{self.clock(row)}  deny   {row['path']}  "
+                       f"{fmt_bytes(row['read_bytes'])} fora do contexto "
+                       f"({row['reason'].split(':')[0]})")
+        elif self.show_all and row["tool"] not in NOT_HOOK:
+            out.append(f"{self.clock(row)}  {row['decision']:<6} {row['path']}  "
+                       f"{fmt_bytes(row['read_bytes'])} ({row['reason'].split(':')[0]})")
+        return out
+
+    def _delegation(self, row):
+        k = kv(row["reason"])
+        matched = [d for d in self.pending
+                   if d["ts"] <= row["ts"] <= d["ts"] + CONVERSION_WINDOW]
+        origin = ""
+        if matched:
+            first = matched[0]
+            wait = int((row["ts"] - first["ts"]).total_seconds())
+            origin = f"  <- negativa de {self.clock(first)} ({wait}s)"
+            self.pending = [d for d in self.pending if d not in matched]
+        if row["decision"] != "ok":
+            return (f"{self.clock(row)}  ERRO   bulk-read {row['reason']}{origin}")
+        return (f"{self.clock(row)}  ok     bulk-read pin={k.get('pin', 0)} "
+                f"pout={k.get('pout', 0)} razão {k.get('ratio', '-')}% "
+                f"{k.get('dur', 0)}s {k.get('model', '')}{origin}")
+
+    def tick(self, now):
+        out = []
+        expired = [d for d in self.pending if now > d["ts"] + CONVERSION_WINDOW]
+        for d in expired:
+            out.append(f"{now.strftime('%H:%M:%S')}  --     negativa de {self.clock(d)} "
+                       f"em {d['path']} sem delegação em 10 min")
+        self.pending = [d for d in self.pending if d not in expired]
+        return out
+
+
+def follow(path, show_all):
+    """Acompanha o log a partir do fim, como tail -f, imprimindo só o que conta."""
+    follower = Follower(show_all)
+    print(f"acompanhando {path} (negativas e delegações; Ctrl-C para sair)", flush=True)
+    try:
+        fh = open(path, encoding="utf-8")
+    except OSError:
+        sys.exit(f"log não encontrado: {path}")
+    fh.seek(0, os.SEEK_END)
+    try:
+        while True:
+            line = fh.readline()
+            if line:
+                row = parse_line(line)
+                if row:
+                    for text in follower.feed(row):
+                        print(text, flush=True)
+                continue
+            for text in follower.tick(dt.datetime.now()):
+                print(text, flush=True)
+            # Log truncado ou recriado: recomeça do início do arquivo novo.
+            if os.path.getsize(path) < fh.tell():
+                fh.close()
+                fh = open(path, encoding="utf-8")
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print()
+    finally:
+        fh.close()
+
+
 def coverage_rows(rows):
     """Maior cobertura alcançada por (sessão, arquivo), direto da coluna 11."""
     best = {}
@@ -272,7 +367,14 @@ def main():
     ap.add_argument("--model", help="filtra um modelo do Ollama (delegações)")
     ap.add_argument("--file", help="filtra arquivos cujo caminho contém o trecho")
     ap.add_argument("--top", type=int, default=10, help="linhas por seção")
+    ap.add_argument("--follow", action="store_true",
+                    help="acompanha o log ao vivo: negativas, delegações e pareamento")
+    ap.add_argument("--all", action="store_true",
+                    help="com --follow, mostra também allow e skip")
     args = ap.parse_args()
+    if args.follow:
+        follow(args.log, args.all)
+        return
 
     since = dt.datetime.fromisoformat(args.since) if args.since else None
     rows = []

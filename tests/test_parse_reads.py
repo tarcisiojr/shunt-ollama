@@ -742,6 +742,78 @@ class BulkReadPromptTest(unittest.TestCase):
         self.assertIn("     1\tdef f():", out)
 
 
+class FollowerTest(unittest.TestCase):
+    """O --follow pareia negativa e delegação; negativa sem delegação vira desistência."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(ROOT, "scripts"))
+        import importlib.util
+        spec = importlib.util.spec_from_loader("shunt_stats", loader=None)
+        self.mod = importlib.util.module_from_spec(spec)
+        with open(os.path.join(ROOT, "scripts", "shunt-stats"), encoding="utf-8") as fh:
+            exec(compile(fh.read(), "shunt-stats", "exec"), self.mod.__dict__)
+
+    def row(self, ts, tool, decision, reason, path="/a.py", read_bytes=12000):
+        return self.mod.parse_line(
+            f"{ts}\ts1\t{tool}\t{decision}\t{reason}\t{path}\t900\t900\t0.13.0"
+            f"\t1-900\t0\t{read_bytes}\t{read_bytes}\n")
+
+    def test_deny_then_delegation_is_paired(self):
+        f = self.mod.Follower()
+        out = f.feed(self.row("2026-09-12T10:00:00", "Read", "deny", "single-read"))
+        self.assertEqual(len(out), 1)
+        self.assertIn("deny   /a.py  11.7 KB fora do contexto (single-read)", out[0])
+        out = f.feed(self.row("2026-09-12T10:00:40", "bulk-read", "ok",
+                              "model=m;files=1;pin=9000;pout=300;dur=38;ratio=3"))
+        self.assertIn("ok     bulk-read pin=9000 pout=300 razão 3% 38s m", out[0])
+        self.assertIn("<- negativa de 10:00:00 (40s)", out[0])
+        self.assertEqual(f.pending, [])
+
+    def test_deny_without_delegation_expires(self):
+        f = self.mod.Follower()
+        f.feed(self.row("2026-09-12T10:00:00", "Read", "deny", "single-read"))
+        self.assertEqual(f.tick(self.mod.dt.datetime(2026, 9, 12, 10, 9, 0)), [])
+        out = f.tick(self.mod.dt.datetime(2026, 9, 12, 10, 10, 1))
+        self.assertEqual(len(out), 1)
+        self.assertIn("negativa de 10:00:00 em /a.py sem delegação em 10 min", out[0])
+        self.assertEqual(f.pending, [])
+
+    def test_delegation_error_and_unpaired(self):
+        f = self.mod.Follower()
+        out = f.feed(self.row("2026-09-12T10:00:00", "bulk-read", "error",
+                              "model=m;curl-rc=28;timeout=60"))
+        self.assertIn("ERRO   bulk-read model=m;curl-rc=28;timeout=60", out[0])
+        self.assertNotIn("negativa", out[0])
+
+    def test_allow_only_with_show_all(self):
+        allow = self.row("2026-09-12T10:00:00", "Read", "allow", "counted")
+        self.assertEqual(self.mod.Follower().feed(allow), [])
+        out = self.mod.Follower(show_all=True).feed(allow)
+        self.assertIn("allow  /a.py", out[0])
+
+    def test_follow_reads_new_lines_from_the_end(self):
+        """Ponta a ponta: o processo só vê o que chega depois de começar."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        log = os.path.join(tmp.name, "shunt.log")
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write("2026-09-12T09:00:00\ts1\tRead\tdeny\tantiga\t/velho.py"
+                     "\t9\t9\t0.13.0\t1-9\t0\t100\t100\n")
+        proc = subprocess.Popen(
+            [sys.executable, os.path.join(ROOT, "scripts", "shunt-stats"),
+             "--log", log, "--follow"], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(proc.kill)
+        self.assertIn("acompanhando", proc.stdout.readline())
+        import time
+        time.sleep(0.7)   # deixa o seek para o fim acontecer antes de escrever
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write("2026-09-12T10:00:00\ts1\tRead\tdeny\tsingle-read\t/novo.py"
+                     "\t900\t900\t0.13.0\t1-900\t0\t12000\t12000\n")
+        line = proc.stdout.readline()
+        self.assertIn("/novo.py", line)
+        self.assertNotIn("/velho.py", line)
+
+
 class ByteMeasurementTest(unittest.TestCase):
     """Linha e byte só coincidem em arquivo homogêneo, e é o byte que custa."""
 

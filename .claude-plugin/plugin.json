@@ -1,7 +1,7 @@
 {
   "name": "shunt-ollama",
   "description": "Roteia leituras grandes do Claude Code para um modelo Ollama local. Os hooks bloqueiam Read/cat/sed acima do limiar, inclusive fatiadas, e apontam para o bulk-read, que devolve bullets ancorados em linha.",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "author": { "name": "Tarcísio Jr" },
   "homepage": "https://github.com/tarcisiojr/shunt-ollama",
   "repository": "https://github.com/tarcisiojr/shunt-ollama",
