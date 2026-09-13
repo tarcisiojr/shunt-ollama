@@ -182,6 +182,24 @@ def print_model_table(rows):
     print()
 
 
+def median_ratio(reasons):
+    ratios = [k["ratio"] for k in reasons if "ratio" in k]
+    return f"{statistics.median(ratios):.0f}%" if ratios else "-"
+
+
+def print_subtask_split(rows):
+    """Razão mediana com e sem --questions: é o que diz se decompor comprimiu."""
+    reasons = [kv(r["reason"]) for r in rows
+               if r["tool"] == "bulk-read" and r["decision"] == "ok"]
+    decomposed = [k for k in reasons if k.get("subtasks", 0) > 1]
+    if not decomposed:
+        return
+    plain = [k for k in reasons if k.get("subtasks", 0) <= 1]
+    print(f"  com subtarefas (--questions): {len(decomposed)} delegação(ões), razão mediana "
+          f"{median_ratio(decomposed)} contra {median_ratio(plain)} das {len(plain)} "
+          "sem decomposição")
+
+
 def coverage_rows(rows):
     """Maior cobertura alcançada por (sessão, arquivo), direto da coluna 11."""
     best = {}
@@ -322,6 +340,7 @@ def main():
         print(f"  economia líquida estimada: "
               f"{overall['sent'] - overall['returned']} tokens "
               f"| tempo total: {overall['seconds']}s")
+        print_subtask_split(rows)
         ratios = overall["ratios"]
         if ratios:
             poor = [r for r in ratios if r >= 50]

@@ -19,4 +19,5 @@ Rules:
 - When the question asks to enumerate (all functions, every method, each caller, list the X), completeness wins: every matching item gets its own line, even the trivial ones. Missing one makes the answer wrong.
 - Otherwise, merge findings that share a purpose into one line instead of listing each statement separately, and skip a line that only restates what the code obviously says. Prefer 15 useful lines over 40 mechanical ones.
 - Answer only what was asked. Do not describe the rest of the file.
+- When the question comes as numbered subtasks, cover every subtask in one pass, still grouped by file, and for a subtask with nothing in these files write exactly `not found: <its number>` on its own line (one per absent subtask, no explanation). Never restate the subtasks, never number the findings.
 - No prose, no preamble, no closing summary, no markdown headers, no code fences, no tables, no bold.

@@ -4,12 +4,16 @@
 #
 # Uso:
 #   bulk-read --question "o que esse serviço faz?" --paths a.java b.java dir/
+#   bulk-read --questions "quais funções validam?" "onde grava?" --paths a.py
 #   bulk-read --question "..." --glob 'src/**/*.rs'
 #   bulk-read --question "o que mudou e onde?" --cmd "git diff main"
 #   git diff | bulk-read --question "..." --stdin
 #
 # Cada arquivo vai numerado (cat -n) em <file path="..." lines="a-b">. O que não
 # cabe em SHUNT_NUM_CTX é fatiado em partes, cada uma com pergunta própria.
+# Com --questions, as subtarefas vão numeradas num único prompt por parte e o
+# modelo abstém-se por subtarefa; as abstenções viram uma linha de contagem.
+# --dry-run imprime os prompts montados sem chamar o Ollama.
 
 set -o pipefail
 SHUNT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,10 +23,12 @@ MODES_DIR="$(cd "$(dirname "$0")/.." && pwd)/modes"
 DEFAULT_QUESTION="Liste os símbolos públicos/exportados com a responsabilidade de cada um, as dependências entre eles e os pontos de entrada."
 
 usage() {
-  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 question=""
+questions=()
+dry_run=0
 paths=()
 globs=()
 cmd=""
@@ -31,6 +37,8 @@ use_stdin=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --question) question="$2"; shift 2 ;;
+    --questions) shift; while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do questions+=("$1"); shift; done ;;
+    --dry-run)  dry_run=1; shift ;;
     --paths)    shift; while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do paths+=("$1"); shift; done ;;
     --glob)     shift; while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do globs+=("$1"); shift; done ;;
     --cmd)      cmd="$2"; shift 2 ;;
@@ -40,6 +48,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Subtarefas numeradas: uma pergunta ampla decomposta em perguntas específicas
+# (estilo MinionS) comprime melhor que o panorama, e o modelo pode dizer
+# "not found: N" para a subtarefa que não tem nada nestes arquivos.
+if [ "${#questions[@]}" -eq 1 ] && [ -z "$question" ]; then
+  question="${questions[0]}"; questions=()
+fi
+if [ "${#questions[@]}" -gt 0 ]; then
+  [ -n "$question" ] && questions=("$question" "${questions[@]}")
+  question=""
+  for i in "${!questions[@]}"; do
+    question+="$((i + 1)). ${questions[$i]}"$'\n'
+  done
+fi
+export SHUNT_SUBTASKS="${#questions[@]}"
 [ -z "$question" ] && question="$DEFAULT_QUESTION"
 
 # ---------------------------------------------------------------------------
@@ -172,7 +194,16 @@ flush_chunk
 
 n=${#chunks[@]}
 for i in "${!chunks[@]}"; do
-  printf 'Question: %s\n' "$question" >> "${chunks[$i]}"
+  if [ "$SHUNT_SUBTASKS" -gt 0 ]; then
+    printf 'Questions (%d numbered subtasks; answer each, and for one with nothing in these files write exactly `not found: <its number>`):\n%s' "$SHUNT_SUBTASKS" "$question" >> "${chunks[$i]}"
+  else
+    printf 'Question: %s\n' "$question" >> "${chunks[$i]}"
+  fi
+  if [ "$dry_run" -eq 1 ]; then
+    printf -- '--- parte %d/%d (%s)\n' "$((i + 1))" "$n" "${chunk_labels[$i]}"
+    cat "${chunks[$i]}"
+    continue
+  fi
   if [ "$n" -gt 1 ]; then
     printf -- '- Parte %d/%d (%s):\n' "$((i + 1))" "$n" "${chunk_labels[$i]}"
   fi
@@ -185,6 +216,8 @@ for i in "${!chunks[@]}"; do
   shunt_invoke "$MODES_DIR/bulk-reader.md" "${chunks[$i]}" \
     "$chunk_floor" "$chunk_timeout" || exit 1
 done
+
+[ "$dry_run" -eq 1 ] && exit 0
 
 char_count=0
 for c in "${chunks[@]}"; do char_count=$((char_count + $(wc -c < "$c" | tr -d ' '))); done
@@ -204,5 +237,5 @@ if [ "$content_tokens" -gt 0 ]; then
   fi
 fi
 shunt_log_line bulk-read ok \
-  "model=$SHUNT_MODEL;files=${#src_files[@]};chunks=$n;pin=$SHUNT_PIN_TOTAL;pout=$SHUNT_POUT_TOTAL;dur=$SHUNT_DUR_TOTAL;ratio=$ratio" \
+  "model=$SHUNT_MODEL;files=${#src_files[@]};chunks=$n;subtasks=$SHUNT_SUBTASKS;pin=$SHUNT_PIN_TOTAL;pout=$SHUNT_POUT_TOTAL;dur=$SHUNT_DUR_TOTAL;ratio=$ratio" \
   "${src_labels[0]}" "$total_lines_all" 0

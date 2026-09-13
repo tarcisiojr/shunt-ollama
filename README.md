@@ -329,7 +329,19 @@ scripts/bulk-read --question "How is the token renewed?" --paths launcher.sh lib
 scripts/bulk-read --question "Where are the handlers?" --glob 'src/**/*.rs'
 scripts/bulk-read --question "What changed and where?" --cmd "git diff main"
 git diff | scripts/bulk-read --question "Summarize per file" --stdin
+scripts/bulk-read --questions "Which validations reject input?" "Where does it persist?" --paths import_service.py
+scripts/bulk-read --dry-run --questions "..." "..." --paths a.py   # prints the prompt, no Ollama call
 ```
+
+**A broad question goes in decomposed.** "What does this module do" makes the model enumerate
+the whole file. `--questions` takes three to five specific subtasks, numbered in a single prompt
+per part, so the time is that of one question. Measured with `qwen3.5:4b` over five vague-versus-
+decomposed pairs, the median ratio went from 10% to 8% at no time cost; the large gain sits with
+models that inflate more, and in what decomposition enables: abstention per subtask. The model abstains per subtask with
+`not found: N`, and the script folds the abstentions into one count line per part. It is the
+part of MinionS (arXiv:2502.15964) that applies here: decomposition and abstention, not the
+remote cost, which the plugin already removes by construction. Every log line carries
+`subtasks=`, and `shunt-stats` compares the median ratio with and without decomposition.
 
 Directories in `--paths` are expanded, skipping `.git` and `node_modules`. With no `--question`,
 the default asks for public symbols, responsibilities, dependencies, and entry points.
@@ -482,8 +494,8 @@ Earlier versions also wrote `always-free`, `edit-window` and `window-counted`, f
 bands that 0.5.0 removed.
 
 On `bulk-read` lines the reason is a `key=value` list: `model` (the Ollama model, since 0.11.0),
-`files`, `chunks`, `pin` and `pout` (tokens sent and returned), `dur` (seconds) and `ratio`
-(answer as % of the content).
+`files`, `chunks`, `subtasks` (number of `--questions` subtasks, since 0.12.0), `pin` and `pout`
+(tokens sent and returned), `dur` (seconds) and `ratio` (answer as % of the content).
 
 Per-session state lives in `$TMPDIR/shunt-state-<session_id>.json`. Deleting it resets the
 running totals.
@@ -532,6 +544,14 @@ language of the routing text the hooks inject.
 
 ## Changelog
 
+- **0.12.0** — MinionS-style decomposition for broad questions. `--questions` sends numbered
+  subtasks in a single prompt per part, the model abstains per subtask and the abstentions fold
+  into one count line; `--dry-run` prints the prompt without calling Ollama, and the log gains
+  `subtasks=`, which `shunt-stats` uses to compare the ratio with and without decomposition. The
+  skill now guides decomposition before the call. Measured over five pairs with `qwen3.5:4b`:
+  median ratio from 10% to 8%, same time (the gap that showed up first was prompt cache). The
+  gain is modest because this model already answers a vague question at 7 to 16%; the piece
+  stays for its zero cost and for the abstention.
 - **0.11.1** — path restoration now accepts a header wrapped in brackets, backticks or quotes,
   and the mode drops a placeholder that `qwen3.5:4b-mlx` copied verbatim. Measured against the
   GGUF on the same question, the quantized MLX tied on time and got five line anchors wrong; the

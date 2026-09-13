@@ -332,7 +332,20 @@ scripts/bulk-read --question "Como o token é renovado?" --paths launcher.sh lib
 scripts/bulk-read --question "Onde ficam os handlers?" --glob 'src/**/*.rs'
 scripts/bulk-read --question "O que mudou e onde?" --cmd "git diff main"
 git diff | scripts/bulk-read --question "Resuma por arquivo" --stdin
+scripts/bulk-read --questions "Que validações rejeitam a entrada?" "Onde persiste?" --paths import_service.py
+scripts/bulk-read --dry-run --questions "..." "..." --paths a.py   # mostra o prompt, sem chamar o Ollama
 ```
+
+**Pergunta ampla vai decomposta.** "O que esse módulo faz" faz o modelo enumerar o arquivo
+inteiro. `--questions` recebe três a cinco subtarefas específicas, numeradas num único prompt
+por parte, então o tempo é o de uma pergunta. Medido com `qwen3.5:4b` em cinco pares
+pergunta vaga contra decomposta, a razão mediana foi de 10% para 8%, sem custo de tempo; o
+ganho grande está nos modelos que inflam mais, e no que a decomposição habilita: abstenção por
+subtarefa. O modelo se abstém por subtarefa com
+`not found: N`, e o script dobra as abstenções numa linha de contagem por parte. É a parte do
+MinionS (arXiv:2502.15964) que se aplica aqui: a decomposição e a abstenção, não o custo remoto,
+que o plugin já elimina por construção. Cada linha do log traz `subtasks=`, e o `shunt-stats`
+compara a razão mediana com e sem decomposição.
 
 Diretórios em `--paths` são expandidos, ignorando `.git` e `node_modules`. Sem `--question`, a
 pergunta padrão pede símbolos públicos, responsabilidades, dependências e pontos de entrada.
@@ -487,8 +500,8 @@ Versões anteriores também gravavam `always-free`, `edit-window` e `window-coun
 isentas que a 0.5.0 removeu.
 
 Nas linhas do `bulk-read` o motivo é uma lista `chave=valor`: `model` (o modelo do Ollama, desde a
-0.11.0), `files`, `chunks`, `pin` e `pout` (tokens enviados e devolvidos), `dur` (segundos) e
-`ratio` (resposta em % do conteúdo).
+0.11.0), `files`, `chunks`, `subtasks` (número de subtarefas de `--questions`, desde a 0.12.0), `pin` e
+`pout` (tokens enviados e devolvidos), `dur` (segundos) e `ratio` (resposta em % do conteúdo).
 
 O estado por sessão fica em `$TMPDIR/shunt-state-<session_id>.json`. Apagar reseta o acumulado.
 
@@ -536,6 +549,14 @@ também o idioma do texto de roteamento que os hooks injetam.
 
 ## Changelog
 
+- **0.12.0** — decomposição estilo MinionS para pergunta ampla. `--questions` manda subtarefas
+  numeradas num único prompt por parte, o modelo se abstém por subtarefa e as abstenções viram
+  uma linha de contagem; `--dry-run` mostra o prompt sem chamar o Ollama, e o log ganha
+  `subtasks=`, que o `shunt-stats` usa para comparar a razão com e sem decomposição. A skill
+  passa a orientar a decomposição antes da chamada. Medido em cinco pares com `qwen3.5:4b`: razão
+  mediana de 10% para 8%, tempo igual (a diferença que apareceu primeiro era cache de prompt).
+  O ganho é modesto porque esse modelo já responde pergunta vaga em 7 a 16%; a peça fica pelo
+  custo zero e pela abstenção.
 - **0.11.1** — a restauração de caminho passa a aceitar cabeçalho entre colchetes, crases ou
   aspas, e o modo deixa de mostrar um marcador que o `qwen3.5:4b-mlx` copiava literalmente. Medido
   contra o GGUF na mesma pergunta, o MLX quantizado empatou em tempo e errou cinco âncoras de

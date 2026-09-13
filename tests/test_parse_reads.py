@@ -541,6 +541,9 @@ class StatsTest(unittest.TestCase):
             fh.write("2026-09-11T10:00:00\t-\tbulk-read\tok\t"
                      "files=1;pin=9000;pout=300;dur=40;ratio=8"
                      "\t/b.py\t900\t0\t0.10.1\t-\t0\n")
+            fh.write("2026-09-12T11:00:00\t-\tbulk-read\tok\t"
+                     "model=qwen3.5:4b;files=1;chunks=1;subtasks=4;pin=10000;pout=400;dur=30;ratio=4"
+                     "\t/a.py\t900\t0\t0.12.0\t-\t0\n")
         out = subprocess.run(
             [os.path.join(ROOT, "scripts", "shunt-stats"), "--log", log],
             capture_output=True, text=True, check=True).stdout
@@ -548,8 +551,10 @@ class StatsTest(unittest.TestCase):
         linhas = {ln.split()[0]: ln.split() for ln in out.splitlines()
                   if ln.strip().startswith(("gemma4:e4b", "qwen3.5:4b", "(sem"))}
         self.assertEqual(linhas["gemma4:e4b"][1:6], ["1", "0", "10000", "500", "6%"])
-        self.assertEqual(linhas["qwen3.5:4b"][1:6], ["1", "1", "10000", "250", "3%"])
+        self.assertEqual(linhas["qwen3.5:4b"][1:6], ["2", "1", "20000", "650", "4%"])
         self.assertIn("(sem", linhas)   # linha anterior à 0.11.0 não some
+        self.assertIn("com subtarefas (--questions): 1 delegação(ões), "
+                      "razão mediana 4% contra 6%", out)
         filtrado = subprocess.run(
             [os.path.join(ROOT, "scripts", "shunt-stats"), "--log", log,
              "--model", "qwen3.5:4b"], capture_output=True, text=True,
@@ -666,6 +671,75 @@ class PathRestoreTest(unittest.TestCase):
         text = ("- Parte 1/2 (/p/a.py:L1-L10):\n/p/a.py\n  3 f: g\n"
                 "not found: saldo\n\nfrase solta do modelo\n")
         self.assertEqual(self.restore(labels, text), text)
+
+
+class FoldAbstentionsTest(unittest.TestCase):
+    """Abstenções por subtarefa viram uma linha de contagem, não uma por ausência."""
+
+    def fold(self, total, text):
+        script = (f'. {os.path.join(ROOT, "scripts", "lib", "ollama.sh")}\n'
+                  f'shunt_fold_abstentions {total}')
+        proc = subprocess.run(["bash", "-c", script], input=text,
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout
+
+    def test_partial_abstention_becomes_one_count_line(self):
+        out = self.fold(4, "/a.py\n  10 f: x\nnot found: 2\n  not found: 4 (nada)\n")
+        self.assertEqual(out, "/a.py\n  10 f: x\n"
+                              "  (sem achados nesta parte para as subtarefas 2, 4 de 4)\n")
+
+    def test_all_abstained_is_plain_not_found(self):
+        out = self.fold(2, "not found: 1\nnot found: 2\n")
+        self.assertEqual(out, "not found: nenhuma das 2 subtarefas nestes arquivos\n")
+
+    def test_no_abstention_passes_through(self):
+        text = "/a.py\n  10 f: x\nnot found: saldo\n"
+        self.assertEqual(self.fold(3, text), text)
+
+
+class BulkReadPromptTest(unittest.TestCase):
+    """--dry-run mostra o prompt montado; é como se confere a decomposição sem Ollama."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.src = os.path.join(self.tmp.name, "a.py")
+        with open(self.src, "w", encoding="utf-8") as fh:
+            fh.write("def f():\n    return 1\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_dry(self, *args):
+        proc = subprocess.run(
+            [os.path.join(ROOT, "scripts", "bulk-read"), "--dry-run", *args,
+             "--paths", self.src], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout
+
+    def test_single_question_keeps_old_shape(self):
+        out = self.run_dry("--question", "onde valida?")
+        self.assertIn("Question: onde valida?\n", out)
+        self.assertNotIn("subtasks", out)
+
+    def test_questions_are_numbered_with_abstention_rule(self):
+        out = self.run_dry("--questions", "onde valida?", "onde grava?")
+        self.assertIn("Questions (2 numbered subtasks", out)
+        self.assertIn("not found: <its number>", out)
+        self.assertIn("\n1. onde valida?\n2. onde grava?\n", out)
+
+    def test_one_questions_entry_is_a_plain_question(self):
+        out = self.run_dry("--questions", "só uma?")
+        self.assertIn("Question: só uma?\n", out)
+
+    def test_question_and_questions_merge(self):
+        out = self.run_dry("--question", "primeira", "--questions", "segunda")
+        self.assertIn("\n1. primeira\n2. segunda\n", out)
+
+    def test_file_tag_and_numbering_present(self):
+        out = self.run_dry("--question", "q")
+        self.assertIn(f'<file path="{self.src}" lines="1-2" total="2">', out)
+        self.assertIn("     1\tdef f():", out)
 
 
 class ByteMeasurementTest(unittest.TestCase):

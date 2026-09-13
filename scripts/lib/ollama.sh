@@ -164,6 +164,29 @@ shunt_restore_paths() {
     }'
 }
 
+# Com subtarefas numeradas, cada "not found: N" é uma abstenção. Elas saem
+# da resposta e viram uma única linha de contagem por parte: o Claude precisa
+# saber o que não foi encontrado, mas não precisa de uma linha por ausência.
+# Abstenção de todas as subtarefas vira "not found" simples, como antes.
+shunt_fold_abstentions() {
+  local total="$1"
+  awk -v total="$total" '
+    /^[[:space:]]*not found: *[0-9]+/ {
+      s = $0; sub(/^[[:space:]]*not found: */, "", s); sub(/[^0-9].*$/, "", s)
+      if (!(s in seen)) { seen[s] = 1; miss[++m] = s }
+      next
+    }
+    { lines[++n] = $0 }
+    END {
+      for (i = 1; i <= n; i++) print lines[i]
+      if (m == 0) exit
+      if (m >= total) { print "not found: nenhuma das " total " subtarefas nestes arquivos"; exit }
+      out = ""
+      for (i = 1; i <= m; i++) out = out (i > 1 ? ", " : "") miss[i]
+      print "  (sem achados nesta parte para as subtarefas " out " de " total ")"
+    }'
+}
+
 # Tokens que o Ollama aceita de prompt, na prática.
 shunt_prompt_limit() {
   printf '%s' $(( SHUNT_NUM_CTX * SHUNT_PROMPT_FRACTION / 100 ))
@@ -349,9 +372,17 @@ shunt_invoke() {
     return 1
   fi
 
+  # Pós-processamento: caminho restaurado e abstenções dobradas. Em pipe
+  # para não perder os totais acumulados acima, que vivem neste shell.
+  local restored
   if [ -n "${SHUNT_LABELS_FILE:-}" ] && [ -r "$SHUNT_LABELS_FILE" ]; then
-    printf '%s\n' "$text" | shunt_restore_paths "$SHUNT_LABELS_FILE"
+    restored=$(printf '%s\n' "$text" | shunt_restore_paths "$SHUNT_LABELS_FILE")
   else
-    printf '%s\n' "$text"
+    restored="$text"
+  fi
+  if [ "${SHUNT_SUBTASKS:-0}" -gt 1 ]; then
+    printf '%s\n' "$restored" | shunt_fold_abstentions "$SHUNT_SUBTASKS"
+  else
+    printf '%s\n' "$restored"
   fi
 }

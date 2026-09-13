@@ -5,6 +5,7 @@ description: "Delega leitura de arquivos grandes, diffs extensos ou vários arqu
 
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/scripts/bulk-read --question "<pergunta específica>" --paths <arquivo|diretório> [...]
+${CLAUDE_PLUGIN_ROOT}/scripts/bulk-read --questions "<subtarefa 1>" "<subtarefa 2>" ... --paths <arquivos>
 ${CLAUDE_PLUGIN_ROOT}/scripts/bulk-read --question "..." --glob 'src/**/*.rs'
 ${CLAUDE_PLUGIN_ROOT}/scripts/bulk-read --question "o que mudou e onde?" --cmd "git diff main"
 git diff | ${CLAUDE_PLUGIN_ROOT}/scripts/bulk-read --question "..." --stdin
@@ -22,6 +23,28 @@ ele depende inteiramente da pergunta.
   Ao ver esse aviso, refaça com uma pergunta mais estreita em vez de usar a resposta inflada.
 - Follow-up custa zero: chame de novo com os mesmos paths e outra pergunta. Duas perguntas
   específicas saem mais baratas que um panorama.
+
+## Intenção ampla: decomponha antes de chamar
+
+"O que esse módulo faz", "explique esse serviço", "como funciona a importação" são perguntas
+que fazem o modelo local enumerar o arquivo inteiro. Em vez de mandá-las como estão, quebre a
+intenção em três a cinco subtarefas específicas e passe todas em `--questions`. Você decompõe
+sem ter lido o arquivo, a partir do que quer saber dele:
+
+```bash
+${CLAUDE_PLUGIN_ROOT}/scripts/bulk-read --questions \
+  "Quais são os pontos de entrada públicos e o que cada um recebe?" \
+  "Que validações rejeitam a entrada, e com qual erro?" \
+  "Onde o estado é persistido ou lido de fora (banco, arquivo, rede)?" \
+  "Que dependências externas ou outros módulos ele chama?" \
+  --paths backend/app/services/import_service.py
+```
+
+As subtarefas vão numeradas num único prompt por parte, então o custo em tempo é o mesmo de
+uma pergunta. O modelo se abstém por subtarefa (`not found: N`), e o script dobra as
+abstenções numa linha de contagem por parte, para você saber o que não existe ali sem gastar
+uma linha por ausência. Subtarefas boas pedem um tipo de coisa cada (validações, efeitos
+externos, pontos de entrada); subtarefas que se sobrepõem devolvem a mesma linha duas vezes.
 
 ## O formato da resposta
 
