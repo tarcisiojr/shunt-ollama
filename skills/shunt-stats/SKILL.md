@@ -13,7 +13,7 @@ ${CLAUDE_PLUGIN_ROOT}/scripts/shunt-stats --top 20             # mais linhas por
 
 ## Como ler a saída
 
-São quatro blocos, e cada um responde a uma pergunta diferente.
+São cinco blocos, e cada um responde a uma pergunta diferente.
 
 **Comparação por versão.** Uma linha por versão do plugin, porque hooks antigos continuam
 rodando em sessões já abertas. A coluna que importa é a **conversão**: a fração de negativas

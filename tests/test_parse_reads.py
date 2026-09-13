@@ -525,6 +525,140 @@ class StatsTest(unittest.TestCase):
         self.assertNotIn("renderam pouco", proc.stdout)
 
 
+    def test_model_table_groups_delegations(self):
+        """Sem o nome do modelo no log, trocar SHUNT_MODEL não era mensurável."""
+        log = os.path.join(self.tmp.name, "modelos.log")
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write("2026-09-12T10:00:00\t-\tbulk-read\tok\t"
+                     "model=gemma4:e4b;files=1;pin=10000;pout=500;dur=40;ratio=6"
+                     "\t/a.py\t900\t0\t0.11.0\t-\t0\n")
+            fh.write("2026-09-12T10:05:00\t-\tbulk-read\tok\t"
+                     "model=qwen3.5:4b;files=1;pin=10000;pout=250;dur=30;ratio=3"
+                     "\t/a.py\t900\t0\t0.11.0\t-\t0\n")
+            fh.write("2026-09-12T10:06:00\t-\tbulk-read\terror\t"
+                     "model=qwen3.5:4b;curl-rc=28;timeout=60"
+                     "\t/a.py\t900\t0\t0.11.0\t-\t0\n")
+            fh.write("2026-09-11T10:00:00\t-\tbulk-read\tok\t"
+                     "files=1;pin=9000;pout=300;dur=40;ratio=8"
+                     "\t/b.py\t900\t0\t0.10.1\t-\t0\n")
+        out = subprocess.run(
+            [os.path.join(ROOT, "scripts", "shunt-stats"), "--log", log],
+            capture_output=True, text=True, check=True).stdout
+        self.assertIn("Comparação por modelo", out)
+        linhas = {ln.split()[0]: ln.split() for ln in out.splitlines()
+                  if ln.strip().startswith(("gemma4:e4b", "qwen3.5:4b", "(sem"))}
+        self.assertEqual(linhas["gemma4:e4b"][1:6], ["1", "0", "10000", "500", "6%"])
+        self.assertEqual(linhas["qwen3.5:4b"][1:6], ["1", "1", "10000", "250", "3%"])
+        self.assertIn("(sem", linhas)   # linha anterior à 0.11.0 não some
+        filtrado = subprocess.run(
+            [os.path.join(ROOT, "scripts", "shunt-stats"), "--log", log,
+             "--model", "qwen3.5:4b"], capture_output=True, text=True,
+            check=True).stdout
+        self.assertNotIn("gemma4:e4b", filtrado)
+        self.assertIn("qwen3.5:4b", filtrado)
+
+
+class ShuntModelTest(unittest.TestCase):
+    """O script edita só a chave SHUNT_MODEL do settings e preserva o resto."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.settings = os.path.join(self.tmp.name, "settings.json")
+        with open(self.settings, "w", encoding="utf-8") as fh:
+            json.dump({"env": {"OUTRA": "1"}, "permissions": {"allow": ["Bash(ls:*)"]}}, fh)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_model(self, *args, env_extra=None):
+        env = {**os.environ, **(env_extra or {})}
+        proc = subprocess.run(
+            [os.path.join(ROOT, "scripts", "shunt-model"), "--settings", self.settings,
+             *args], capture_output=True, text=True, env=env)
+        return proc
+
+    def read(self):
+        with open(self.settings, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_set_force_preserves_other_keys(self):
+        proc = self.run_model("set", "modelo:teste", "--force")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Reinicie", proc.stdout)
+        dados = self.read()
+        self.assertEqual(dados["env"]["SHUNT_MODEL"], "modelo:teste")
+        self.assertEqual(dados["env"]["OUTRA"], "1")
+        self.assertEqual(dados["permissions"]["allow"], ["Bash(ls:*)"])
+
+    def test_unset_removes_only_the_key(self):
+        self.run_model("set", "modelo:teste", "--force")
+        proc = self.run_model("unset")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.read()["env"], {"OUTRA": "1"})
+        self.assertIn("nada a fazer", self.run_model("unset").stdout)
+
+    def test_current_follows_environment(self):
+        proc = self.run_model("current", env_extra={"SHUNT_MODEL": "x:y"})
+        self.assertEqual(proc.stdout.strip(), "x:y")
+
+    def test_set_creates_missing_settings(self):
+        novo = os.path.join(self.tmp.name, "sub", "settings.json")
+        proc = subprocess.run(
+            [os.path.join(ROOT, "scripts", "shunt-model"), "--settings", novo,
+             "set", "m:1", "--force"], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(novo, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"env": {"SHUNT_MODEL": "m:1"}})
+
+
+class PathRestoreTest(unittest.TestCase):
+    """O cabeçalho encurtado pelo modelo volta a ser o caminho que o Claude abre."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.labels = os.path.join(self.tmp.name, "labels")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def restore(self, labels, text):
+        with open(self.labels, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(labels) + "\n")
+        script = (f'. {os.path.join(ROOT, "scripts", "lib", "ollama.sh")}\n'
+                  f'shunt_restore_paths {self.labels}')
+        proc = subprocess.run(["bash", "-c", script], input=text,
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout
+
+    def test_suffix_becomes_full_label(self):
+        full = "/Users/x/proj/backend/app/services/import_service.py"
+        out = self.restore([full], "/app/services/import_service.py\n"
+                                   "  212-213 _read: rejeita\n")
+        self.assertEqual(out, f"{full}\n  212-213 _read: rejeita\n")
+
+    def test_relative_suffix_and_trailing_colon(self):
+        full = "/Users/x/proj/backend/app/services/import_service.py"
+        out = self.restore([full], "services/import_service.py:\n  1 a: b\n")
+        self.assertTrue(out.startswith(full + "\n"))
+
+    def test_partial_word_is_not_a_boundary(self):
+        """`_service.py` é sufixo de string, não de caminho: fica como veio."""
+        full = "/Users/x/proj/import_service.py"
+        out = self.restore([full], "_service.py\n")
+        self.assertEqual(out, "_service.py\n")
+
+    def test_ambiguous_suffix_is_left_alone(self):
+        labels = ["/p/a/models.py", "/p/b/models.py"]
+        self.assertEqual(self.restore(labels, "models.py\n"), "models.py\n")
+
+    def test_untouched_lines(self):
+        labels = ["/p/a.py"]
+        text = ("- Parte 1/2 (/p/a.py:L1-L10):\n/p/a.py\n  3 f: g\n"
+                "not found: saldo\n\nfrase solta do modelo\n")
+        self.assertEqual(self.restore(labels, text), text)
+
+
 class ByteMeasurementTest(unittest.TestCase):
     """Linha e byte só coincidem em arquivo homogêneo, e é o byte que custa."""
 
@@ -692,7 +826,10 @@ class ShellCalibrationTest(unittest.TestCase):
     def sh(self, body, **env_extra):
         script = (f'. {os.path.join(ROOT, "scripts", "lib", "ollama.sh")}\n'
                   + body)
-        env = {**os.environ, "SHUNT_CALIBRATION": self.path}
+        # O modelo vem fixo: quem tem SHUNT_MODEL no ambiente gravaria a
+        # amostra sob outro nome e o teste leria a chave errada.
+        env = {**os.environ, "SHUNT_CALIBRATION": self.path,
+               "SHUNT_MODEL": "gemma4:e4b"}
         env.pop("SHUNT_TIMEOUT_SECONDS", None)
         env.update(env_extra)
         out = subprocess.run(["bash", "-c", script], capture_output=True,

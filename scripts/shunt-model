@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Lista os modelos disponíveis no Ollama e grava a escolha em SHUNT_MODEL.
+
+O plugin lê o modelo da variável de ambiente, e o lugar estável para ela é o
+bloco `env` do settings.json do Claude Code. Este script edita só essa chave,
+preservando o resto do arquivo, e recusa um nome que o Ollama não conhece,
+porque um modelo inexistente só apareceria como erro na próxima delegação.
+
+Uso:
+  shunt-model                    # lista os modelos, marcando o atual
+  shunt-model current            # imprime o modelo em uso
+  shunt-model set qwen3.5:4b     # grava no ~/.claude/settings.json
+  shunt-model set NOME --force   # grava mesmo sem o modelo estar baixado
+  shunt-model unset              # remove a chave e volta ao padrão do plugin
+
+Opções: --settings CAMINHO (padrão ~/.claude/settings.json), --json.
+"""
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "hooks", "lib"))
+import shunt_common as sc  # noqa: E402  (padrão do modelo vive lá)
+
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+DEFAULT_SETTINGS = os.path.expanduser("~/.claude/settings.json")
+
+
+def installed_models():
+    """Nomes e tamanhos dos modelos que o Ollama tem baixados."""
+    try:
+        with urllib.request.urlopen(f"{OLLAMA_HOST}/api/tags", timeout=5) as resp:
+            data = json.load(resp)
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        sys.exit(f"Ollama não respondeu em {OLLAMA_HOST}: {exc}")
+    return sorted(
+        ((m["name"], m.get("size", 0)) for m in data.get("models", [])),
+        key=lambda item: item[0])
+
+
+def load_settings(path):
+    """Devolve o JSON do settings ou um objeto vazio se ele não existir."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except ValueError as exc:
+        sys.exit(f"{path} não é JSON válido: {exc}")
+
+
+def save_settings(path, data):
+    """Grava com indentação de dois espaços, que é o formato do Claude Code."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def configured_model(path):
+    """O que está gravado no settings, ou None."""
+    return load_settings(path).get("env", {}).get("SHUNT_MODEL")
+
+
+def gb(size):
+    return f"{size / 1073741824:.1f} GB"
+
+
+def cmd_list(args):
+    current = sc.MODEL
+    models = installed_models()
+    if args.json:
+        print(json.dumps({"current": current, "configured": configured_model(args.settings),
+                          "models": [{"name": n, "size": s} for n, s in models]},
+                         ensure_ascii=False))
+        return
+    if not models:
+        print("Nenhum modelo baixado. Use: ollama pull <nome>")
+    for name, size in models:
+        mark = "*" if name == current else " "
+        print(f"{mark} {name:<28} {gb(size):>8}")
+    if current not in {n for n, _ in models}:
+        print(f"\nAtenção: o modelo em uso ({current}) não está baixado. "
+              f"Rode: ollama pull {current}")
+    origin = "settings.json" if configured_model(args.settings) == current else (
+        "variável de ambiente" if os.environ.get("SHUNT_MODEL") else "padrão do plugin")
+    print(f"\n* em uso: {current} ({origin})")
+
+
+def cmd_current(args):
+    print(sc.MODEL)
+
+
+def cmd_set(args):
+    names = {n for n, _ in installed_models()} if not args.force else set()
+    if not args.force and args.name not in names:
+        sys.exit(f"'{args.name}' não está baixado no Ollama. "
+                 f"Rode 'ollama pull {args.name}' ou repita com --force.")
+    data = load_settings(args.settings)
+    data.setdefault("env", {})["SHUNT_MODEL"] = args.name
+    save_settings(args.settings, data)
+    print(f"SHUNT_MODEL={args.name} gravado em {args.settings}.")
+    print("Reinicie o Claude Code para a nova sessão usar o modelo.")
+
+
+def cmd_unset(args):
+    data = load_settings(args.settings)
+    env = data.get("env", {})
+    if "SHUNT_MODEL" not in env:
+        print(f"SHUNT_MODEL não estava em {args.settings}; nada a fazer.")
+        return
+    del env["SHUNT_MODEL"]
+    if not env:
+        del data["env"]
+    save_settings(args.settings, data)
+    print(f"SHUNT_MODEL removido de {args.settings}; o plugin volta ao padrão.")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--settings", default=DEFAULT_SETTINGS,
+                    help="settings.json do Claude Code a editar")
+    ap.add_argument("--json", action="store_true", help="saída em JSON (list)")
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("list")
+    sub.add_parser("current")
+    p_set = sub.add_parser("set")
+    p_set.add_argument("name")
+    p_set.add_argument("--force", action="store_true",
+                       help="grava sem conferir se o modelo está baixado")
+    sub.add_parser("unset")
+    args = ap.parse_args()
+    {"list": cmd_list, "current": cmd_current, "set": cmd_set,
+     "unset": cmd_unset, None: cmd_list}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    main()

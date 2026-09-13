@@ -4,12 +4,13 @@ The files arrive wrapped in <file path="..." lines="a-b" total="N"> tags, with e
 
 Output shape, exactly:
 
-path/to/file.ext
+<the path attribute of the file tag, verbatim>
   120-145 SymbolName: what it does
   201 otherThing: what it does
 
 Rules:
 - Group by file. Write each file's path once, on its own line, with no bullet, no punctuation and no indentation. Never repeat the path inside the group.
+- The path line is the `path` attribute of the <file> tag, character for character: keep it absolute when it is absolute, keep every directory, never shorten, abbreviate or normalize it. The agent opens the file by that exact string; a trimmed path breaks the next step.
 - Under it, one line per finding, indented by exactly two spaces, starting with the line number or range, then a space, then the symbol name, then a colon and one clause. No hyphen, no bullet marker.
 - Write a range only when the item spans lines; a single number otherwise. Never write the `L` prefix and never repeat the file path.
 - Report only what is literally in the files. If the question asks about something that is not there, write `not found: <what>` as the only line under the relevant file. Never guess.

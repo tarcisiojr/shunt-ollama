@@ -7,7 +7,7 @@ sessões: uma mudança surtiu efeito (comparação por versão), quanto de cada
 arquivo chegou ao contexto (cobertura) e se isso aconteceu em fatias pequenas
 (fatiamento).
 
-Uso: shunt-stats [--log CAMINHO] [--since AAAA-MM-DD] [--version 0.5.0]
+Uso: shunt-stats [--log CAMINHO] [--since AAAA-MM-DD] [--version 0.5.0] [--model NOME]
                  [--top N] [--file TRECHO]
 """
 
@@ -149,6 +149,39 @@ def print_version_table(rows):
     print()
 
 
+def print_model_table(rows):
+    """Uma linha por modelo do Ollama, para comparar trocas de SHUNT_MODEL.
+
+    O nome vem do `model=` gravado pelo bulk-read a partir da 0.11.0; linhas
+    anteriores caem em "(sem registro)" para não sumirem da conta.
+    """
+    bulk = [r for r in rows if r["tool"] == "bulk-read"]
+    if not bulk:
+        return
+    by_model = collections.defaultdict(list)
+    for r in bulk:
+        by_model[kv(r["reason"]).get("model") or "(sem registro)"].append(r)
+    print("Comparação por modelo (delegações do bulk-read)")
+    print(f"  {'modelo':<22} {'deleg.':>7} {'erros':>6} {'enviados':>9} "
+          f"{'devolvidos':>11} {'razão':>6} {'s/deleg':>8} {'tok/s':>6}")
+    for model in sorted(by_model):
+        ok = [r for r in by_model[model] if r["decision"] == "ok"]
+        errors = len(by_model[model]) - len(ok)
+        if not ok:
+            print(f"  {model:<22} {0:>7} {errors:>6}")
+            continue
+        sent = sum(kv(r["reason"]).get("pin", 0) for r in ok)
+        returned = sum(kv(r["reason"]).get("pout", 0) for r in ok)
+        seconds = sum(kv(r["reason"]).get("dur", 0) for r in ok)
+        ratios = [kv(r["reason"])["ratio"] for r in ok
+                  if "ratio" in kv(r["reason"])]
+        ratio = f"{statistics.median(ratios):.0f}%" if ratios else "-"
+        rate = f"{(sent + returned) / seconds:.0f}" if seconds else "-"
+        print(f"  {model:<22} {len(ok):>7} {errors:>6} {sent:>9} "
+              f"{returned:>11} {ratio:>6} {seconds / len(ok):>8.0f} {rate:>6}")
+    print()
+
+
 def coverage_rows(rows):
     """Maior cobertura alcançada por (sessão, arquivo), direto da coluna 11."""
     best = {}
@@ -218,6 +251,7 @@ def main():
     ap.add_argument("--log", default=DEFAULT_LOG)
     ap.add_argument("--since", help="AAAA-MM-DD")
     ap.add_argument("--version", help="filtra uma versão do plugin")
+    ap.add_argument("--model", help="filtra um modelo do Ollama (delegações)")
     ap.add_argument("--file", help="filtra arquivos cujo caminho contém o trecho")
     ap.add_argument("--top", type=int, default=10, help="linhas por seção")
     args = ap.parse_args()
@@ -234,6 +268,9 @@ def main():
                     continue
                 if args.version and row["version"] != args.version:
                     continue
+                if args.model and row["tool"] == "bulk-read" \
+                        and kv(row["reason"]).get("model") != args.model:
+                    continue
                 if args.file and args.file not in row["path"]:
                     continue
                 rows.append(row)
@@ -247,6 +284,7 @@ def main():
           f"| sessões: {overall['sessions']}\n")
 
     print_version_table(rows)
+    print_model_table(rows)
     print_coverage(rows, args.top)
 
     hooks = [r for r in rows if r["tool"] not in NOT_HOOK]

@@ -117,7 +117,8 @@ Three hooks, one delegation script, one metrics script.
 | `hooks/check-bash-read` | `PreToolUse` on `Bash` and on MCP tools that execute shell. Parses `cat`, `head`, `tail`, `sed -n`, `awk`, `nl`, `bat`, `rtk read`. |
 | `hooks/session-start` | `SessionStart`. Injects the routing rule and records whether Ollama is up. |
 | `scripts/bulk-read` | Builds the message, calls Ollama, prints the answer. |
-| `scripts/shunt-stats` | Summarizes the log: version comparison, coverage, slicing, delegated tokens. |
+| `scripts/shunt-stats` | Summarizes the log: comparison by version and by model, coverage, slicing, delegated tokens. |
+| `scripts/shunt-model` | Lists the models pulled into Ollama and writes the choice to `SHUNT_MODEL` in `settings.json`. |
 | `scripts/release` | Validates, tags and publishes a release for the version in the manifest. |
 
 `session-start` is what makes the plugin get used rather than discovered by accident. Without
@@ -395,8 +396,8 @@ few lines, so verify exact values before an `Edit`.
 
 ## Metrics and debugging
 
-Two skills expose this to Claude: `bulk-reader` delegates a read, and `shunt-stats` reads and
-interprets these numbers, so asking "how is the plugin doing?" is enough.
+Three skills expose this to Claude: `bulk-reader` delegates a read, `shunt-model` lists and
+switches the local model, and `shunt-stats` reads and interprets these numbers, so asking "how is the plugin doing?" is enough.
 
 ```bash
 scripts/shunt-stats
@@ -438,6 +439,11 @@ Cobertura por arquivo e sessão (top 10 por percentual)
 from slices is the signature of reading around the budget, and `--file` narrows either section
 to one path.
 
+The **Comparison by model** block groups delegations by the `model=` that `bulk-read` writes
+since 0.11.0: delegations, tokens sent and returned, median ratio, seconds per delegation and
+tokens per second. It answers whether a `SHUNT_MODEL` switch paid off, and `--model NAME` isolates
+one of them.
+
 The rest shows decisions per tool, most-blocked files, and tokens delegated to Ollama against
 tokens returned to Claude.
 
@@ -474,6 +480,10 @@ threshold was raised to the floor), plus `heredoc` and `unresolved:$VAR` (not an
 
 Earlier versions also wrote `always-free`, `edit-window` and `window-counted`, from the exempt
 bands that 0.5.0 removed.
+
+On `bulk-read` lines the reason is a `key=value` list: `model` (the Ollama model, since 0.11.0),
+`files`, `chunks`, `pin` and `pout` (tokens sent and returned), `dur` (seconds) and `ratio`
+(answer as % of the content).
 
 Per-session state lives in `$TMPDIR/shunt-state-<session_id>.json`. Deleting it resets the
 running totals.
@@ -522,6 +532,12 @@ language of the routing text the hooks inject.
 
 ## Changelog
 
+- **0.11.0** — the model becomes comparable. Every `bulk-read` line records `model=`,
+  `shunt-stats` gains the comparison by model and the `--model` filter, and the `shunt-model`
+  skill lists the pulled models and writes the choice to `settings.json`. `bulk-read` restores
+  the full path in the answer header when the model shortens it, because Claude opens the file
+  by that string and an abbreviated path broke the next step; the mode now demands the tag's
+  `path` attribute, but small models ignore that often enough.
 - **0.10.1** — documents why widening `SHUNT_NUM_CTX` does not help (a 48k-token prompt at
   65536 took 1,328s against 78s for an equivalent call at 32768) and removes two functions left
   dead by the previous release.

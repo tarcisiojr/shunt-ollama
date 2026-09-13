@@ -131,6 +131,35 @@ shunt_log_line() {
     >> "$SHUNT_HOOK_LOG" 2>/dev/null
 }
 
+# Modelos pequenos encurtam o caminho no cabeçalho do grupo: o qwen3.5:4b
+# devolve /app/services/x.py para /Users/.../backend/app/services/x.py mesmo
+# com o modo exigindo o atributo path. O Claude abre o arquivo por essa string,
+# então a resposta passa por aqui e toda linha sem indentação que seja sufixo
+# de um label real, em fronteira de diretório, vira o label. Sufixo ambíguo
+# (dois labels com o mesmo final) fica como veio: adivinhar seria pior.
+shunt_restore_paths() {
+  local labels_file="$1"
+  awk -v labels_file="$labels_file" '
+    BEGIN { while ((getline l < labels_file) > 0) labels[++n] = l }
+    /^[[:space:]]/ || /^- Parte / || /^not found:/ || /^$/ { print; next }
+    {
+      line = $0
+      sub(/[[:space:]:]+$/, "", line)
+      hits = 0; best = ""
+      for (i = 1; i <= n; i++) {
+        l = labels[i]
+        if (l == line) { hits = 1; best = l; break }
+        if (length(l) > length(line) \
+            && substr(l, length(l) - length(line) + 1) == line \
+            && (substr(line, 1, 1) == "/" \
+                || substr(l, length(l) - length(line), 1) == "/")) {
+          hits++; best = l
+        }
+      }
+      if (hits == 1) print best; else print
+    }'
+}
+
 # Tokens que o Ollama aceita de prompt, na prática.
 shunt_prompt_limit() {
   printf '%s' $(( SHUNT_NUM_CTX * SHUNT_PROMPT_FRACTION / 100 ))
@@ -269,7 +298,7 @@ shunt_invoke() {
     else
       echo "Error: chamada ao Ollama falhou (rc=$rc)." >&2
     fi
-    shunt_log_line bulk-read error "curl-rc=$rc;timeout=$timeout"
+    shunt_log_line bulk-read error "model=$SHUNT_MODEL;curl-rc=$rc;timeout=$timeout"
     return 1
   fi
 
@@ -282,7 +311,7 @@ shunt_invoke() {
   err=$(printf '%s' "$response" | jq -r '.error // empty')
   if [ -n "$err" ]; then
     echo "Error: Ollama: $err" >&2
-    shunt_log_line bulk-read error "ollama:$err"
+    shunt_log_line bulk-read error "model=$SHUNT_MODEL;ollama:$err"
     return 1
   fi
 
@@ -312,9 +341,13 @@ shunt_invoke() {
   # conteúdo, com a mesma confiança de sempre, então é descartada.
   if [ "$expected" -gt 0 ] && [ "$pin" -lt $(( expected * 70 / 100 )) ]; then
     echo "Error: o Ollama processou $pin tokens de um prompt de ~$expected; o resto foi descartado em silêncio (context shift do llama.cpp em num_ctx/2). A resposta cobriria só parte do conteúdo e foi rejeitada. Aumente SHUNT_NUM_CTX se houver RAM/VRAM, ou baixe SHUNT_PROMPT_FRACTION para gerar partes menores." >&2
-    shunt_log_line bulk-read error "truncated;pin=$pin;expected=$expected"
+    shunt_log_line bulk-read error "model=$SHUNT_MODEL;truncated;pin=$pin;expected=$expected"
     return 1
   fi
 
-  printf '%s\n' "$text"
+  if [ -n "${SHUNT_LABELS_FILE:-}" ] && [ -r "$SHUNT_LABELS_FILE" ]; then
+    printf '%s\n' "$text" | shunt_restore_paths "$SHUNT_LABELS_FILE"
+  else
+    printf '%s\n' "$text"
+  fi
 }
