@@ -144,7 +144,11 @@ shunt_restore_paths() {
     /^[[:space:]]/ || /^- Parte / || /^not found:/ || /^$/ { print; next }
     {
       line = $0
-      sub(/[[:space:]:]+$/, "", line)
+      # Colchetes, crases e aspas em volta do caminho: modelo copiando
+      # o formato do prompt. Tira antes de comparar.
+      q = sprintf("%c", 39)
+      sub("^[[:space:]]*[<`\"" q "\\[]+", "", line)
+      sub("[>`\"" q "\\]]*[[:space:]:]*$", "", line)
       hits = 0; best = ""
       for (i = 1; i <= n; i++) {
         l = labels[i]

@@ -370,7 +370,7 @@ errar alguns números de linha, então confira valores exatos antes de um `Edit`
 
 | Variável | Default | Função |
 |---|---|---|
-| `SHUNT_MODEL` | `gemma4:e4b` | modelo do Ollama |
+| `SHUNT_MODEL` | `gemma4:e4b` | modelo do Ollama; no macOS as variantes `-mlx` (ex. `qwen3.5:4b-mlx`) usam o backend MLX do próprio Ollama, sem mudar nada no plugin |
 | `SHUNT_TEMPERATURE` | `0.2` | mesma do original |
 | `SHUNT_NUM_CTX` | `32768` | janela de contexto; o Ollama sobe com 4096 se você não setar, e aí trunca em silêncio |
 | `SHUNT_KEEP_ALIVE` | `30m` | mantém o modelo carregado entre chamadas |
@@ -536,6 +536,10 @@ também o idioma do texto de roteamento que os hooks injetam.
 
 ## Changelog
 
+- **0.11.1** — a restauração de caminho passa a aceitar cabeçalho entre colchetes, crases ou
+  aspas, e o modo deixa de mostrar um marcador que o `qwen3.5:4b-mlx` copiava literalmente. Medido
+  contra o GGUF na mesma pergunta, o MLX quantizado empatou em tempo e errou cinco âncoras de
+  linha; a nota no README diz como usá-lo, não recomenda.
 - **0.11.0** — o modelo passa a ser comparável. Cada linha do `bulk-read` grava `model=`, o
   `shunt-stats` ganha a comparação por modelo e o filtro `--model`, e a skill `shunt-model` lista
   os modelos baixados e grava a escolha no `settings.json`. O `bulk-read` restaura o caminho

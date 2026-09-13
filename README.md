@@ -367,7 +367,7 @@ few lines, so verify exact values before an `Edit`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SHUNT_MODEL` | `gemma4:e4b` | Ollama model |
+| `SHUNT_MODEL` | `gemma4:e4b` | Ollama model; on macOS the `-mlx` variants (e.g. `qwen3.5:4b-mlx`) run on Ollama's own MLX backend with no plugin change |
 | `SHUNT_TEMPERATURE` | `0.2` | same as the original |
 | `SHUNT_NUM_CTX` | `32768` | context window; Ollama starts at 4096 if unset, and then truncates silently |
 | `SHUNT_KEEP_ALIVE` | `30m` | keeps the model loaded between calls |
@@ -532,6 +532,10 @@ language of the routing text the hooks inject.
 
 ## Changelog
 
+- **0.11.1** — path restoration now accepts a header wrapped in brackets, backticks or quotes,
+  and the mode drops a placeholder that `qwen3.5:4b-mlx` copied verbatim. Measured against the
+  GGUF on the same question, the quantized MLX tied on time and got five line anchors wrong; the
+  README note says how to use it, not that you should.
 - **0.11.0** — the model becomes comparable. Every `bulk-read` line records `model=`,
   `shunt-stats` gains the comparison by model and the `--model` filter, and the `shunt-model`
   skill lists the pulled models and writes the choice to `settings.json`. `bulk-read` restores

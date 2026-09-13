@@ -642,6 +642,15 @@ class PathRestoreTest(unittest.TestCase):
         out = self.restore([full], "services/import_service.py:\n  1 a: b\n")
         self.assertTrue(out.startswith(full + "\n"))
 
+    def test_brackets_and_backticks_are_stripped(self):
+        """O qwen3.5:4b-mlx devolveu `<Users/.../x.py>`: copiou o formato do prompt."""
+        full = "/Users/x/proj/backend/app/services/import_service.py"
+        for header in ("<Users/x/proj/backend/app/services/import_service.py>",
+                       "`/app/services/import_service.py`",
+                       "\"services/import_service.py\":"):
+            out = self.restore([full], header + "\n   118 E: f\n")
+            self.assertEqual(out, f"{full}\n   118 E: f\n", header)
+
     def test_partial_word_is_not_a_boundary(self):
         """`_service.py` é sufixo de string, não de caminho: fica como veio."""
         full = "/Users/x/proj/import_service.py"
