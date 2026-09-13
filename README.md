@@ -498,8 +498,10 @@ Reasons: `small-file` (file under the threshold, out of scope), `counted` (charg
 budget), `escape` (charged to the escape balance after the budget was spent), `binary` (not text,
 left alone), `single-read` (denied on size), `cumulative` (denied because the budget is spent),
 `escape-exhausted` (denied because the escape balance is spent too), `multi-file` (denied on the
-sum), `ollama-off` (allowed because no model is available), `threshold-floor` (the configured
-threshold was raised to the floor), plus `heredoc` and `unresolved:$VAR` (not analyzable).
+sum), `ollama-off` (allowed because no model is available), `tool-result` (allowed: a tool output
+Claude Code saved under `~/.claude/projects/*/tool-results/` for the model to read back),
+`threshold-floor` (the configured threshold was raised to the floor), plus `heredoc` and
+`unresolved:$VAR` (not analyzable).
 
 Earlier versions also wrote `always-free`, `edit-window` and `window-counted`, from the exempt
 bands that 0.5.0 removed.
@@ -555,6 +557,9 @@ language of the routing text the hooks inject.
 
 ## Changelog
 
+- **0.14.1** — files under `~/.claude/projects/*/tool-results/` are exempt, logged as
+  `tool-result`: Claude Code parks a large tool output there for the model to read back, and
+  denying that read left the model without the result it had just asked for.
 - **0.14.0** — the shell hook stops naming context-mode and intercepts any `mcp__*` tool,
   looking up the command in `tool_input` by field name, because every user has their own tools.
   `SHUNT_EXEMPT_TOOLS` exempts the ones that return only a summary, logged as `exempt-tool`, and

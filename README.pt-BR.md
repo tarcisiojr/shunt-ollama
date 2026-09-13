@@ -504,8 +504,10 @@ Motivos: `small-file` (arquivo abaixo do limiar, fora de alcance), `counted` (de
 orçamento), `escape` (debitada do saldo de escape depois de o orçamento acabar), `binary` (não é
 texto, liberado), `single-read` (negada por tamanho), `cumulative` (negada porque o orçamento
 acabou), `escape-exhausted` (negada porque o saldo de escape também acabou), `multi-file`
-(negada pela soma), `ollama-off` (liberada por falta do modelo), `threshold-floor` (o limiar
-configurado foi elevado ao piso), `heredoc` e `unresolved:$VAR` (não analisável).
+(negada pela soma), `ollama-off` (liberada por falta do modelo), `tool-result` (liberada: saída
+de ferramenta que o Claude Code guardou em `~/.claude/projects/*/tool-results/` para o modelo
+ler depois), `threshold-floor` (o limiar configurado foi elevado ao piso), `heredoc` e
+`unresolved:$VAR` (não analisável).
 
 Versões anteriores também gravavam `always-free`, `edit-window` e `window-counted`, das faixas
 isentas que a 0.5.0 removeu.
@@ -560,6 +562,9 @@ também o idioma do texto de roteamento que os hooks injetam.
 
 ## Changelog
 
+- **0.14.1** — arquivos em `~/.claude/projects/*/tool-results/` ficam isentos, com registro
+  `tool-result`: o Claude Code guarda ali uma saída grande de ferramenta para o modelo ler
+  depois, e negar essa leitura deixava o modelo sem o resultado que acabara de pedir.
 - **0.14.0** — o hook de shell deixa de nomear o context-mode e passa a interceptar qualquer
   ferramenta `mcp__*`, procurando o comando no `tool_input` pelo nome do campo, porque cada
   usuário tem as suas ferramentas. `SHUNT_EXEMPT_TOOLS` isenta as que devolvem só resumo, com

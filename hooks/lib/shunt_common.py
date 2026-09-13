@@ -284,6 +284,23 @@ def is_regular_file(path: str) -> bool:
     return os.path.isfile(path) and os.access(path, os.R_OK)
 
 
+# Onde o Claude Code guarda uma saída grande de ferramenta para o modelo ler
+# depois: ~/.claude/projects/<projeto>/<sessão>/tool-results/*.txt. Bloquear
+# ali deixa o modelo sem o resultado que ele acabou de pedir, e o conteúdo já
+# foi produzido por uma ferramenta dele, não por uma leitura de arquivo.
+CLAUDE_CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+TOOL_RESULTS_DIRNAME = "tool-results"
+
+
+def is_tool_result(path: str) -> bool:
+    """Caminho dentro de um diretório tool-results do próprio Claude Code."""
+    projects = os.path.join(os.path.realpath(CLAUDE_CONFIG_DIR), "projects")
+    real = os.path.realpath(path)
+    if not real.startswith(projects + os.sep):
+        return False
+    return TOOL_RESULTS_DIRNAME in real[len(projects):].split(os.sep)
+
+
 def estimate_delegation(paths: List[str]) -> Tuple[int, int, int]:
     """Custo de delegar ao modelo local: (partes, segundos, tokens enviados).
 
@@ -443,6 +460,9 @@ def decide(session: str, tool: str, requests: Dict[str, List[Request]]) -> None:
         grand_total = 0
 
         for path, reqs in requests.items():
+            if is_tool_result(path):
+                log(session, tool, "allow", "tool-result", path)
+                continue
             total_lines, total_bytes, binary = file_stats(path)
             if binary:
                 log(session, tool, "allow", "binary", path, total_lines, 0)

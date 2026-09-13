@@ -33,7 +33,8 @@ fatiamento lista esses casos explicitamente.
 
 **Decisões dos hooks.** O motivo de cada decisão. `small-file` é arquivo abaixo do limiar, fora
 de alcance. `counted` é leitura debitada do orçamento. `escape` é leitura de edição após o
-orçamento acabar. `binary` é arquivo que não é texto, liberado. `heredoc` e `unresolved:$VAR`
+orçamento acabar. `binary` é arquivo que não é texto, liberado. `tool-result` é saída de ferramenta guardada pelo
+Claude Code em `tool-results/`, liberada. `heredoc` e `unresolved:$VAR`
 são comandos que o parser não consegue analisar, então são pontos cegos, não aprovações.
 
 **bulk-read.** Tokens que foram para o Ollama contra tokens devolvidos ao Claude, e a resposta

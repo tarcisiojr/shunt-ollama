@@ -485,6 +485,25 @@ class McpShellToolsTest(HookEndToEndTest):
                             {"commands": [{"command": f"cat {self.big}"}]})
         self.assertEqual(self.decision(out), "deny")
 
+    def test_tool_result_file_is_allowed_for_read_and_shell(self):
+        """Saída grande de ferramenta que o Claude Code guardou em disco é do
+        próprio modelo: negar ali o deixa sem o resultado que pediu."""
+        results_dir = os.path.join(self.dir, "projects", "-proj", "sess", "tool-results")
+        os.makedirs(results_dir)
+        big = make_file(results_dir, "mcp-ctx_batch_execute-1.txt", 900)
+        env = {**self.env, "CLAUDE_CONFIG_DIR": self.dir}
+        out = self.run_hook("check-file-size", "Read", {"file_path": big}, env=env)
+        self.assertEqual(self.decision(out), "allow")
+        out = self.run_hook("check-bash-read", "Bash", {"command": f"cat {big}"}, env=env)
+        self.assertEqual(self.decision(out), "allow")
+        self.assertEqual(self.reasons_logged(), ["tool-result", "tool-result"])
+        # Um diretório tool-results fora de ~/.claude/projects é do usuário.
+        user_dir = os.path.join(self.dir, "src", "tool-results")
+        os.makedirs(user_dir)
+        other = make_file(user_dir, "big.txt", 900)
+        out = self.run_hook("check-file-size", "Read", {"file_path": other}, env=env)
+        self.assertEqual(self.decision(out), "deny")
+
 
 class StatsTest(unittest.TestCase):
     """O agregador precisa ler o formato antigo de 8 colunas junto do novo de
