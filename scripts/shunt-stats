@@ -74,10 +74,33 @@ def version_key(version):
     return (2, version)
 
 
+def pick_deny(pending, delegation):
+    """A negativa que esta delegação atendeu, ou None.
+
+    Primeiro a do mesmo arquivo dentro da janela; sem ela, só a mais recente
+    dentro da janela. Uma delegação casa com uma negativa, nunca com todas:
+    a regra anterior dava dezesseis negativas como convertidas por uma
+    delegação de um arquivo só, e escondia que o Claude desistiu das outras.
+    Delegação de vários arquivos grava só o primeiro, então os demais caem
+    no pareamento por tempo.
+    """
+    window = [d for d in pending
+              if d["ts"] <= delegation["ts"] <= d["ts"] + CONVERSION_WINDOW]
+    same_path = [d for d in window if d["path"] == delegation["path"]]
+    if same_path:
+        return same_path[-1]
+    return window[-1] if window else None
+
+
 def conversions(denies, bulk_ok):
-    times = [r["ts"] for r in bulk_ok]
-    return sum(1 for d in denies
-               if any(d["ts"] <= t <= d["ts"] + CONVERSION_WINDOW for t in times))
+    pending = sorted(denies, key=lambda d: d["ts"])
+    converted = 0
+    for b in sorted(bulk_ok, key=lambda r: r["ts"]):
+        d = pick_deny(pending, b)
+        if d is not None:
+            pending.remove(d)
+            converted += 1
+    return converted
 
 
 def summarize(rows):
@@ -240,14 +263,13 @@ class Follower:
 
     def _delegation(self, row):
         k = kv(row["reason"])
-        matched = [d for d in self.pending
-                   if d["ts"] <= row["ts"] <= d["ts"] + CONVERSION_WINDOW]
         origin = ""
-        if matched:
-            first = matched[0]
-            wait = int((row["ts"] - first["ts"]).total_seconds())
-            origin = f"  <- negativa de {self.clock(first)} ({wait}s)"
-            self.pending = [d for d in self.pending if d not in matched]
+        deny = pick_deny(self.pending, row)
+        if deny is not None:
+            wait = int((row["ts"] - deny["ts"]).total_seconds())
+            how = "" if deny["path"] == row["path"] else ", por tempo"
+            origin = f"  <- negativa de {self.clock(deny)} ({wait}s{how})"
+            self.pending.remove(deny)
         if row["decision"] != "ok":
             return (f"{self.clock(row)}  ERRO   bulk-read {row['reason']}{origin}")
         return (f"{self.clock(row)}  ok     bulk-read pin={k.get('pin', 0)} "
@@ -456,7 +478,7 @@ def main():
     if denies:
         pct = 100 * overall["converted"] / len(denies)
         print(f"\nConversão: {overall['converted']}/{len(denies)} denies "
-              f"({pct:.0f}%) seguidos de bulk-read em até 10 min")
+              f"({pct:.0f}%) atendidos por um bulk-read em até 10 min")
         if pct < 20:
             print("  Conversão baixa: os bloqueios estão economizando contexto, "
                   "mas o Claude está desistindo da informação em vez de delegar.")

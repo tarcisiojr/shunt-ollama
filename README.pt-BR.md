@@ -445,7 +445,8 @@ Comparação por versão
 ```
 
 `delegações` conta as execuções bem-sucedidas do `bulk-read`, com `+N!` marcando as que
-falharam. `conversão` é a fração de negativas seguidas de uma delegação em até dez minutos, e é
+falharam. `conversão` é a fração de negativas atendidas por uma delegação: a do mesmo arquivo em
+até dez minutos ou, sem ela, a negativa mais recente na janela, e cada delegação atende uma só. É
 o número que diz se o plugin está sendo usado como desvio ou apenas como freio. Amostra abaixo
 de 30 eventos recebe aviso explícito, e conversão abaixo de 20% também.
 
@@ -557,6 +558,11 @@ também o idioma do texto de roteamento que os hooks injetam.
 
 ## Changelog
 
+- **0.13.1** — a conversão e o `--follow` pareiam delegação com negativa pelo caminho do arquivo,
+  e cada delegação atende uma negativa só. A regra anterior, só por tempo, deu dezesseis negativas
+  como convertidas por uma delegação de um arquivo, e escondeu que o Claude desistiu das outras
+  catorze. Delegação de vários arquivos grava só o primeiro; os demais caem no pareamento por
+  tempo, marcado como tal na tela.
 - **0.13.0** — `shunt-stats --follow` acompanha o log ao vivo e pareia negativa com delegação,
   marcando a espera entre as duas e a negativa que passou dez minutos sem delegação. `--all`
   inclui `allow` e `skip`. A lógica de pareamento vive numa classe separada do laço de leitura,

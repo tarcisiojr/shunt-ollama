@@ -18,7 +18,8 @@ São cinco blocos, e cada um responde a uma pergunta diferente.
 
 **Comparação por versão.** Uma linha por versão do plugin, porque hooks antigos continuam
 rodando em sessões já abertas. A coluna que importa é a **conversão**: a fração de negativas
-seguidas de uma chamada ao modelo local em até dez minutos. Conversão alta significa que o
+atendidas por uma chamada ao modelo local: a do mesmo arquivo em até dez minutos ou, sem ela, a
+negativa mais recente na janela, uma por delegação. Conversão alta significa que o
 plugin está desviando a leitura; conversão baixa significa que ele só está freando, e o Claude
 está desistindo da informação em vez de delegar. Taxa de bloqueio alta com conversão zero é o
 pior cenário, não o melhor.

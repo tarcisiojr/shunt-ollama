@@ -499,6 +499,21 @@ class StatsTest(unittest.TestCase):
         self.assertIn("2 delegação(ões)", out)
         self.assertIn("9700", out)   # tokens enviados ao Ollama, somando as duas
 
+    def test_conversion_counts_one_deny_per_delegation(self):
+        """Dezesseis negativas e uma delegação não são 100% de conversão."""
+        log = os.path.join(self.tmp.name, "leque.log")
+        with open(log, "w", encoding="utf-8") as fh:
+            for i in range(3):
+                fh.write(f"2026-09-13T08:47:0{i}\ts1\tRead\tdeny\tsingle-read\t/f{i}.py"
+                         "\t900\t900\t0.13.1\t1-900\t0\t9000\t9000\n")
+            fh.write("2026-09-13T08:49:00\t-\tbulk-read\tok\t"
+                     "model=m;files=1;pin=3000;pout=300;dur=40;ratio=10"
+                     "\t/f1.py\t900\t0\t0.13.1\t-\t0\n")
+        out = subprocess.run(
+            [os.path.join(ROOT, "scripts", "shunt-stats"), "--log", log],
+            capture_output=True, text=True, check=True).stdout
+        self.assertIn("Conversão: 1/3 denies (33%)", out)
+
     def test_small_sample_warning(self):
         self.assertIn("amostra pequena", self.run_stats())
 
@@ -768,6 +783,27 @@ class FollowerTest(unittest.TestCase):
         self.assertIn("ok     bulk-read pin=9000 pout=300 razão 3% 38s m", out[0])
         self.assertIn("<- negativa de 10:00:00 (40s)", out[0])
         self.assertEqual(f.pending, [])
+
+    def test_delegation_pairs_by_path_and_leaves_the_rest_pending(self):
+        """Uma delegação atende uma negativa; as outras seguem pendentes."""
+        f = self.mod.Follower()
+        f.feed(self.row("2026-09-12T10:00:00", "Read", "deny", "single-read", "/a.py"))
+        f.feed(self.row("2026-09-12T10:00:05", "Read", "deny", "single-read", "/b.py"))
+        f.feed(self.row("2026-09-12T10:00:09", "Read", "deny", "single-read", "/c.py"))
+        out = f.feed(self.row("2026-09-12T10:01:00", "bulk-read", "ok",
+                              "model=m;files=1;pin=3000;pout=200;dur=20;ratio=7", "/b.py"))
+        self.assertIn("<- negativa de 10:00:05 (55s)", out[0])
+        self.assertNotIn("por tempo", out[0])
+        self.assertEqual([d["path"] for d in f.pending], ["/a.py", "/c.py"])
+
+    def test_delegation_without_path_match_takes_only_the_latest(self):
+        f = self.mod.Follower()
+        f.feed(self.row("2026-09-12T10:00:00", "Read", "deny", "single-read", "/a.py"))
+        f.feed(self.row("2026-09-12T10:00:05", "Read", "deny", "single-read", "/b.py"))
+        out = f.feed(self.row("2026-09-12T10:01:00", "bulk-read", "ok",
+                              "model=m;files=2;pin=3000;pout=200;dur=20;ratio=7", "/z.py"))
+        self.assertIn("<- negativa de 10:00:05 (55s, por tempo)", out[0])
+        self.assertEqual([d["path"] for d in f.pending], ["/a.py"])
 
     def test_deny_without_delegation_expires(self):
         f = self.mod.Follower()

@@ -440,8 +440,9 @@ Comparação por versão
 ```
 
 `delegações` counts successful `bulk-read` runs, with `+N!` marking failures. `conversão` is the
-share of denials followed by a delegation within ten minutes, which is the number that says
-whether the plugin is being used as a detour or merely as a brake. A sample under 30 events
+share of denials served by a delegation: the one for the same file within ten minutes or, failing
+that, the most recent denial in the window, and each delegation serves one only. It is the number
+that says whether the plugin is being used as a detour or merely as a brake. A sample under 30 events
 gets an explicit warning, and conversion under 20% gets one too.
 
 A second section reports how much of each file reached the context, and flags slicing:
@@ -552,6 +553,11 @@ language of the routing text the hooks inject.
 
 ## Changelog
 
+- **0.13.1** — conversion and `--follow` pair a delegation with a denial by file path, and each
+  delegation serves one denial only. The previous time-only rule reported sixteen denials as
+  converted by a single one-file delegation, hiding that Claude gave up on the other fourteen.
+  A multi-file delegation records only its first file; the rest fall back to time pairing,
+  marked as such on screen.
 - **0.13.0** — `shunt-stats --follow` tails the log live and pairs a deny with its delegation,
   marking the wait between the two and the deny that went ten minutes without one. `--all`
   includes `allow` and `skip`. The pairing logic lives in a class separate from the read loop,
