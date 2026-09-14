@@ -610,7 +610,6 @@ class StatsTest(unittest.TestCase):
         self.assertIn("mediana 8%", proc.stdout)
         self.assertNotIn("renderam pouco", proc.stdout)
 
-
     def test_model_table_groups_delegations(self):
         """Sem o nome do modelo no log, trocar SHUNT_MODEL não era mensurável."""
         log = os.path.join(self.tmp.name, "modelos.log")
@@ -628,7 +627,8 @@ class StatsTest(unittest.TestCase):
                      "files=1;pin=9000;pout=300;dur=40;ratio=8"
                      "\t/b.py\t900\t0\t0.10.1\t-\t0\n")
             fh.write("2026-09-12T11:00:00\t-\tbulk-read\tok\t"
-                     "model=qwen3.5:4b;files=1;chunks=1;subtasks=4;pin=10000;pout=400;dur=30;ratio=4"
+                     "model=qwen3.5:4b;files=1;chunks=1;subtasks=4;"
+                     "pin=10000;pout=400;dur=30;ratio=4"
                      "\t/a.py\t900\t0\t0.12.0\t-\t0\n")
         out = subprocess.run(
             [os.path.join(ROOT, "scripts", "shunt-stats"), "--log", log],
