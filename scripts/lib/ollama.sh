@@ -94,6 +94,11 @@ SHUNT_VERSION="${SHUNT_VERSION:-$(shunt_version)}"
 SHUNT_PIN_TOTAL=0
 SHUNT_POUT_TOTAL=0
 SHUNT_DUR_TOTAL=0
+# Achados devolvidos e quantos deles vieram com número de linha, mais as
+# repetições por formato: é o que diz se o modelo está servindo ao agente.
+SHUNT_FINDINGS_TOTAL=0
+SHUNT_NUMBERED_TOTAL=0
+SHUNT_RETRY_TOTAL=0
 
 SHUNT_TMPFILES=()
 shunt_tmpfile() {
@@ -188,6 +193,49 @@ shunt_fold_abstentions() {
 }
 
 # Tokens que o Ollama aceita de prompt, na prática.
+# O modelo pequeno copia o formato de exemplo um atributo por vez: o
+# gemma4:e4b devolve "26 nome: ..." sem os dois espaços, ou "  46<TAB>nome"
+# copiando o prefixo numerado do arquivo. O agente só precisa do número, então
+# indentação e separador são corrigidos por código, e não pedidos no prompt.
+shunt_normalize_findings() {
+  awk '
+    /^[ \t]*[0-9]+(-[0-9]+)?[ \t]/ {
+      sub(/^[ \t]*/, "")
+      sub(/[ \t]+/, " ")
+      print "  " $0; next
+    }
+    { print }'
+}
+
+# Imprime "numerados total" dos achados: linha indentada que não é abstenção.
+shunt_count_findings() {
+  awk '
+    /^[ \t]*not found:/ { next }
+    /^[ \t]+[^ \t]/ {
+      total++
+      if ($0 ~ /^[ \t]+[0-9]+(-[0-9]+)?[ \t]/) numbered++
+    }
+    END { printf "%d %d\n", numbered + 0, total + 0 }'
+}
+
+# Resposta sem a linha do caminho: com uma única fonte não há o que adivinhar
+# e o rótulo entra no topo. Com várias, fica como veio.
+shunt_ensure_header() {
+  local labels_file="$1"
+  awk -v labels_file="$labels_file" '
+    BEGIN { while ((getline l < labels_file) > 0) labels[++n] = l }
+    { lines[++m] = $0; if ($0 ~ /^[^ \t]/ && $0 !~ /^not found:/) headed = 1 }
+    END {
+      if (!headed && n == 1 && m > 0) print labels[1]
+      for (i = 1; i <= m; i++) print lines[i]
+    }'
+}
+
+# Lembrete anexado ao fim da mensagem quando a resposta veio sem número de
+# linha. No fim, e não no system prompt, porque é onde o modelo de 4B mais
+# obedece: medido no gemma4:e4b, a mesma regra no system prompt não bastou.
+SHUNT_FORMAT_REMINDER="Format reminder: every finding line starts with two spaces, then the line number from the numbered prefix, then the symbol name. A finding without a line number is invalid. Keep the file path line above the findings."
+
 shunt_prompt_limit() {
   printf '%s' $(( SHUNT_NUM_CTX * SHUNT_PROMPT_FRACTION / 100 ))
 }
@@ -288,7 +336,7 @@ shunt_record_sample() {
 #   $3 tokens esperados no prompt, para detectar truncamento (0 = não checar)
 #   $4 timeout em segundos (opcional; padrão vem da calibração)
 shunt_invoke() {
-  local system_file="$1" message_file="$2" expected="${3:-0}" timeout="$4"
+  local system_file="$1" message_file="$2" expected="${3:-0}" timeout="$4" retried="${5:-0}"
   local payload response text rc err
   if [ -z "$timeout" ]; then
     timeout="$(shunt_timeout_for "$expected")"
@@ -372,13 +420,34 @@ shunt_invoke() {
     return 1
   fi
 
-  # Pós-processamento: caminho restaurado e abstenções dobradas. Em pipe
-  # para não perder os totais acumulados acima, que vivem neste shell.
-  local restored
+  # Pós-processamento: achados normalizados, caminho restaurado e abstenções
+  # dobradas. Em pipe para não perder os totais acumulados acima, que vivem
+  # neste shell.
+  local restored counts numbered findings
+  restored=$(printf '%s\n' "$text" | shunt_normalize_findings)
   if [ -n "${SHUNT_LABELS_FILE:-}" ] && [ -r "$SHUNT_LABELS_FILE" ]; then
-    restored=$(printf '%s\n' "$text" | shunt_restore_paths "$SHUNT_LABELS_FILE")
-  else
-    restored="$text"
+    restored=$(printf '%s\n' "$restored" | shunt_ensure_header "$SHUNT_LABELS_FILE" \
+      | shunt_restore_paths "$SHUNT_LABELS_FILE")
+  fi
+  counts=$(printf '%s\n' "$restored" | shunt_count_findings)
+  numbered=${counts%% *}
+  findings=${counts##* }
+  # Achado sem número de linha não serve ao agente, que abre o arquivo por
+  # ele. Uma repetição com o lembrete no fim da mensagem resolve na maioria
+  # das vezes; a segunda resposta é devolvida como vier.
+  if [ "$numbered" -eq 0 ] && [ "$findings" -gt 0 ] && [ "$retried" -eq 0 ]; then
+    echo "[shunt: resposta sem números de linha ($findings achados); repetindo com lembrete de formato]" >&2
+    local retry_file
+    shunt_tmpfile retry_file || return 1
+    { cat "$message_file"; printf '\n%s\n' "$SHUNT_FORMAT_REMINDER"; } > "$retry_file"
+    SHUNT_RETRY_TOTAL=$((SHUNT_RETRY_TOTAL + 1))
+    shunt_invoke "$system_file" "$retry_file" "$expected" "$timeout" 1
+    return $?
+  fi
+  SHUNT_FINDINGS_TOTAL=$((SHUNT_FINDINGS_TOTAL + findings))
+  SHUNT_NUMBERED_TOTAL=$((SHUNT_NUMBERED_TOTAL + numbered))
+  if [ "$numbered" -eq 0 ] && [ "$findings" -gt 0 ]; then
+    echo "[shunt: aviso — a resposta veio sem números de linha mesmo após repetir; localize os identificadores com grep -n antes de abrir o arquivo]" >&2
   fi
   if [ "${SHUNT_SUBTASKS:-0}" -gt 1 ]; then
     printf '%s\n' "$restored" | shunt_fold_abstentions "$SHUNT_SUBTASKS"

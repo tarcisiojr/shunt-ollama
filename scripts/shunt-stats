@@ -215,7 +215,7 @@ def print_model_table(rows):
         by_model[kv(r["reason"]).get("model") or "(sem registro)"].append(r)
     print("Comparação por modelo (delegações do bulk-read)")
     print(f"  {'modelo':<22} {'deleg.':>7} {'erros':>6} {'enviados':>9} "
-          f"{'devolvidos':>11} {'razão':>6} {'s/deleg':>8} {'tok/s':>6}")
+          f"{'devolvidos':>11} {'razão':>6} {'s/deleg':>8} {'tok/s':>6} {'sem nº':>7}")
     for model in sorted(by_model):
         ok = [r for r in by_model[model] if r["decision"] == "ok"]
         errors = len(by_model[model]) - len(ok)
@@ -229,8 +229,14 @@ def print_model_table(rows):
                   if "ratio" in kv(r["reason"])]
         ratio = f"{statistics.median(ratios):.0f}%" if ratios else "-"
         rate = f"{(sent + returned) / seconds:.0f}" if seconds else "-"
+        # Achado sem número de linha não serve ao Claude; a fatia deles é o
+        # que separa um modelo que responde bem de um que responde bonito.
+        found = sum(kv(r["reason"]).get("findings", 0) for r in ok)
+        numbered = sum(kv(r["reason"]).get("numbered", 0) for r in ok)
+        unnumbered = f"{100 * (found - numbered) / found:.0f}%" if found else "-"
         print(f"  {model:<22} {len(ok):>7} {errors:>6} {sent:>9} "
-              f"{returned:>11} {ratio:>6} {seconds / len(ok):>8.0f} {rate:>6}")
+              f"{returned:>11} {ratio:>6} {seconds / len(ok):>8.0f} {rate:>6} "
+              f"{unnumbered:>7}")
     print()
 
 

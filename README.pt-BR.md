@@ -228,6 +228,20 @@ Cada chamada também compara os tokens que esperava enviar com o que o Ollama re
 processado. Se faltar, o conteúdo foi cortado, e a resposta é **rejeitada** em vez de devolvida:
 uma resposta parcial com aparência de completa é pior que nenhuma.
 
+### O formato da resposta
+
+O agente usa a resposta para decidir quais linhas abrir, então um achado sem número de linha não
+vale nada para ele. Um modelo de 4B copia o formato de exemplo um atributo por vez: medido no
+`gemma4:e4b`, o mesmo prompt voltou como `26 _env_int: ...` sem os dois espaços ou como
+`  _env_int: ...` sem o número, nunca os dois juntos, enquanto o `qwen3.5:4b` manteve o formato
+inteiro em todas as rodadas. Por isso o formato é garantido por código, e não por prompt: linha
+numerada é reindentada, tabulação copiada do prefixo numerado vira espaço, e a linha do caminho,
+quando falta, é reposta se há uma única fonte. Quando nenhum achado traz número de linha, a
+chamada é repetida uma vez com um lembrete de formato no fim da mensagem, que é onde o modelo
+pequeno mais obedece; a segunda resposta é devolvida como vier, com aviso. Cada linha do
+`bulk-read` grava `findings=`, `numbered=` e `retries=`, e a tabela por modelo mostra a fatia de
+achados que vieram sem número.
+
 ### Adaptação à máquina
 
 A velocidade do modelo é propriedade do hardware, não do plugin. O mesmo `gemma4:e4b` passa de
@@ -468,9 +482,9 @@ fatias é a assinatura de leitura em volta do orçamento, e `--file` restringe q
 a um caminho.
 
 O bloco **Comparação por modelo** agrupa as delegações pelo `model=` que o `bulk-read` grava
-desde a 0.11.0: delegações, tokens enviados e devolvidos, razão mediana, segundos por delegação e
-tokens por segundo. É o que responde se uma troca de `SHUNT_MODEL` valeu, e `--model NOME` isola um
-deles.
+desde a 0.11.0: delegações, tokens enviados e devolvidos, razão mediana, segundos por delegação,
+tokens por segundo e a fatia de achados que vieram sem número de linha (`sem nº`). É o que
+responde se uma troca de `SHUNT_MODEL` valeu, e `--model NOME` isola um deles.
 
 O resto mostra decisões por ferramenta, arquivos mais bloqueados e tokens delegados ao Ollama
 contra tokens devolvidos ao Claude.
@@ -577,6 +591,12 @@ também o idioma do texto de roteamento que os hooks injetam.
 
 ## Changelog
 
+- **0.15.0** — o formato da resposta passa a ser garantido por código: linha numerada é
+  reindentada, a linha do caminho é reposta quando há uma única fonte, e resposta sem nenhum
+  número de linha é repetida uma vez com lembrete de formato. O `gemma4:e4b` copia o exemplo um
+  atributo por vez e devolvia achados que o agente não tinha como abrir; o `qwen3.5:4b` não era
+  afetado. O log ganha `findings=`, `numbered=` e `retries=`, e a tabela por modelo a coluna
+  `sem nº`.
 - **0.14.1** — arquivos em `~/.claude/projects/*/tool-results/` ficam isentos, com registro
   `tool-result`: o Claude Code guarda ali uma saída grande de ferramenta para o modelo ler
   depois, e negar essa leitura deixava o modelo sem o resultado que acabara de pedir.

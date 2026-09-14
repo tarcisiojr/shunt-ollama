@@ -237,5 +237,5 @@ if [ "$content_tokens" -gt 0 ]; then
   fi
 fi
 shunt_log_line bulk-read ok \
-  "model=$SHUNT_MODEL;files=${#src_files[@]};chunks=$n;subtasks=$SHUNT_SUBTASKS;pin=$SHUNT_PIN_TOTAL;pout=$SHUNT_POUT_TOTAL;dur=$SHUNT_DUR_TOTAL;ratio=$ratio" \
+  "model=$SHUNT_MODEL;files=${#src_files[@]};chunks=$n;subtasks=$SHUNT_SUBTASKS;pin=$SHUNT_PIN_TOTAL;pout=$SHUNT_POUT_TOTAL;dur=$SHUNT_DUR_TOTAL;ratio=$ratio;findings=$SHUNT_FINDINGS_TOTAL;numbered=$SHUNT_NUMBERED_TOTAL;retries=$SHUNT_RETRY_TOTAL" \
   "${src_labels[0]}" "$total_lines_all" 0

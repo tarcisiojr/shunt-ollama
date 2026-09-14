@@ -28,10 +28,11 @@ ${CLAUDE_PLUGIN_ROOT}/scripts/shunt-model unset           # volta ao padrão do 
 
 Cada delegação grava `model=` no log, e o `shunt-stats` imprime o bloco **Comparação por
 modelo**: delegações, tokens enviados e devolvidos, razão mediana da resposta, segundos por
-delegação e tokens por segundo. Use `shunt-stats --model <nome>` para isolar um deles. Um
+delegação, tokens por segundo e a fatia de achados sem número de linha (`sem nº`). Use `shunt-stats --model <nome>` para isolar um deles. Um
 modelo só é comparável depois de algumas delegações reais; com menos de dez, diga que a
 amostra é pequena.
 
 Critérios que costumam decidir: tempo por delegação (o Claude espera essa chamada), razão da
-resposta (quanto menor, mais o modelo comprime) e memória, que o log não mede. Um modelo mais
+resposta (quanto menor, mais o modelo comprime), `sem nº` (achado sem número não serve ao
+Claude, mesmo que a descrição seja boa) e memória, que o log não mede. Um modelo mais
 lento que o atual raramente compensa, mesmo respondendo melhor.

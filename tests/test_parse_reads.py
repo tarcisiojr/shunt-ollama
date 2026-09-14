@@ -5,6 +5,7 @@ Os comandos abaixo vieram de sessões reais em que os hooks falharam.
 """
 
 import json
+import shlex
 import os
 import subprocess
 import sys
@@ -209,7 +210,10 @@ class HookEndToEndTest(unittest.TestCase):
                     "SHUNT_EDIT_BYTES": "850", "SHUNT_ESCAPE_BYTES": "850",
                     "SHUNT_ASSUME_OLLAMA": "1", "TMPDIR": self.dir,
                     "SHUNT_HOOK_LOG": os.path.join(self.dir, "log.tsv"),
-                    "CLAUDE_PLUGIN_ROOT": ROOT}
+                    "CLAUDE_PLUGIN_ROOT": ROOT,
+                    # Quem tem isenções no settings.json as herdaria aqui e
+                    # veria os testes de ferramenta MCP liberarem tudo.
+                    "SHUNT_EXEMPT_TOOLS": ""}
         self.session = "sess-test"
 
     def tearDown(self):
@@ -1280,3 +1284,119 @@ class SessionStartTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FindingsFormatTest(unittest.TestCase):
+    """O modelo pequeno copia o formato um atributo por vez: o gemma4:e4b
+    numera sem indentar, ou indenta sem numerar. O número é o que o agente
+    usa, então a indentação é consertada por código e a falta de número
+    dispara uma repetição com lembrete."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def sh(self, body, text):
+        script = (f'. {os.path.join(ROOT, "scripts", "lib", "ollama.sh")}\n' + body)
+        proc = subprocess.run(["bash", "-c", script], input=text,
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout
+
+    def test_unindented_number_gets_two_spaces(self):
+        out = self.sh("shunt_normalize_findings",
+                      "/p/a.py\n26 _env_int: lê inteiro\n120-145 run: roda\n")
+        self.assertEqual(out, "/p/a.py\n  26 _env_int: lê inteiro\n  120-145 run: roda\n")
+
+    def test_tab_copied_from_prefix_becomes_space(self):
+        out = self.sh("shunt_normalize_findings", "/p/a.py\n  46\t_env_int: lê\n")
+        self.assertEqual(out, "/p/a.py\n  46 _env_int: lê\n")
+
+    def test_lines_already_right_are_untouched(self):
+        text = "/p/a.py\n  26 x: y\nnot found: z\n  outro: sem número\n"
+        self.assertEqual(self.sh("shunt_normalize_findings", text), text)
+
+    def test_counts_numbered_against_all_findings(self):
+        text = "/p/a.py\n  26 x: y\n  z: sem número\n  not found: 2\nnot found: w\n"
+        self.assertEqual(self.sh("shunt_count_findings", text), "1 2\n")
+
+    def test_single_label_is_prepended_when_header_is_missing(self):
+        labels = os.path.join(self.tmp.name, "labels")
+        open(labels, "w", encoding="utf-8").write("/p/a.py\n")
+        out = self.sh(f"shunt_ensure_header {labels}", "  26 x: y\n")
+        self.assertEqual(out, "/p/a.py\n  26 x: y\n")
+        # Com cabeçalho presente, ou com mais de um rótulo, nada muda.
+        self.assertEqual(self.sh(f"shunt_ensure_header {labels}", "/p/a.py\n  26 x: y\n"),
+                         "/p/a.py\n  26 x: y\n")
+        open(labels, "w", encoding="utf-8").write("/p/a.py\n/p/b.py\n")
+        self.assertEqual(self.sh(f"shunt_ensure_header {labels}", "  26 x: y\n"),
+                         "  26 x: y\n")
+
+
+class FormatRetryTest(unittest.TestCase):
+    """Resposta sem número de linha repete uma vez com o lembrete no fim da
+    mensagem; a segunda vale como vier, e o log conta as duas."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.calls = os.path.join(self.tmp.name, "calls")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_invoke(self, first, second):
+        """curl de mentira: devolve `first` na 1ª chamada e `second` na 2ª,
+        guardando cada mensagem recebida em calls.N."""
+        fake = os.path.join(self.tmp.name, "curl")
+        with open(fake, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/bash\n"
+                     f'n=$(( $(ls {self.calls}.* 2>/dev/null | wc -l) + 1 ))\n'
+                     f'cat > {self.calls}.$n\n'
+                     f'if [ "$n" -eq 1 ]; then c={shlex.quote(json.dumps(first))}; '
+                     f'else c={shlex.quote(json.dumps(second))}; fi\n'
+                     'printf \'{"message":{"content":%s},"prompt_eval_count":300,'
+                     '"eval_count":10,"total_duration":1000000000,'
+                     '"prompt_eval_duration":500000000}\' "$c"\n')
+        os.chmod(fake, 0o755)
+        sys_file = os.path.join(self.tmp.name, "sys.md")
+        msg_file = os.path.join(self.tmp.name, "msg.txt")
+        labels = os.path.join(self.tmp.name, "labels")
+        open(sys_file, "w", encoding="utf-8").write("system")
+        open(msg_file, "w", encoding="utf-8").write("Question: q\n")
+        open(labels, "w", encoding="utf-8").write("/p/a.py\n")
+        script = (f'. {os.path.join(ROOT, "scripts", "lib", "ollama.sh")}\n'
+                  f'shunt_invoke {sys_file} {msg_file} 0 60\n'
+                  'echo "retries=$SHUNT_RETRY_TOTAL findings=$SHUNT_FINDINGS_TOTAL '
+                  'numbered=$SHUNT_NUMBERED_TOTAL"')
+        env = {**os.environ,
+               "PATH": self.tmp.name + os.pathsep + os.environ["PATH"],
+               "SHUNT_LABELS_FILE": labels,
+               "SHUNT_CALIBRATION": os.path.join(self.tmp.name, "c.json"),
+               "SHUNT_HOOK_LOG": os.path.join(self.tmp.name, "log")}
+        proc = subprocess.run(["bash", "-c", script], capture_output=True,
+                              text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc
+
+    def test_unnumbered_answer_is_retried_with_reminder(self):
+        proc = self.run_invoke("/p/a.py\n  x: sem número\n",
+                               "  26 x: com número\n")
+        self.assertIn("repetindo com lembrete", proc.stderr)
+        with open(self.calls + ".2", encoding="utf-8") as fh:
+            self.assertIn("Format reminder", json.load(fh)["messages"][1]["content"])
+        self.assertFalse(os.path.exists(self.calls + ".3"))
+        # A segunda resposta veio sem cabeçalho e o rótulo único foi reposto.
+        self.assertEqual(proc.stdout, "/p/a.py\n  26 x: com número\n"
+                                      "retries=1 findings=1 numbered=1\n")
+
+    def test_numbered_answer_is_not_retried(self):
+        proc = self.run_invoke("/p/a.py\n26 x: y\n", "nunca")
+        self.assertFalse(os.path.exists(self.calls + ".2"))
+        self.assertEqual(proc.stdout, "/p/a.py\n  26 x: y\nretries=0 findings=1 numbered=1\n")
+
+    def test_second_unnumbered_answer_is_kept_with_warning(self):
+        proc = self.run_invoke("/p/a.py\n  x: y\n", "/p/a.py\n  x: y\n")
+        self.assertIn("mesmo após repetir", proc.stderr)
+        self.assertEqual(proc.stdout, "/p/a.py\n  x: y\nretries=1 findings=1 numbered=0\n")

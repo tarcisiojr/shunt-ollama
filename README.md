@@ -226,6 +226,20 @@ Every call also compares the tokens it expected to send against what Ollama repo
 A shortfall means the content was cut, and the answer is **rejected** rather than returned, since
 a partial answer that looks complete is worse than no answer.
 
+### The answer format
+
+The agent uses the answer to decide which lines to open, so a finding without its line number
+is worth nothing to it. A 4B model copies the example format one attribute at a time: measured
+on `gemma4:e4b`, the same prompt came back as `26 _env_int: ...` without the two-space indent or
+as `  _env_int: ...` without the number, never both at once, while `qwen3.5:4b` kept the whole
+format in every run. So the format is enforced by code rather than by prompt: a numbered line is
+re-indented, a tab copied from the numbered prefix becomes a space, and a missing path line is
+restored when there is a single source. When no finding carries a line number, the call is
+repeated once with a format reminder appended to the end of the message, which is where a small
+model obeys best; the second answer is returned as it comes, with a warning. Each `bulk-read`
+line logs `findings=`, `numbered=` and `retries=`, and the model table shows the share of
+findings that came without a number.
+
 ### Adapting to the machine
 
 Model speed is a property of the hardware, not of the plugin. The same `gemma4:e4b` runs above
@@ -463,9 +477,9 @@ from slices is the signature of reading around the budget, and `--file` narrows 
 to one path.
 
 The **Comparison by model** block groups delegations by the `model=` that `bulk-read` writes
-since 0.11.0: delegations, tokens sent and returned, median ratio, seconds per delegation and
-tokens per second. It answers whether a `SHUNT_MODEL` switch paid off, and `--model NAME` isolates
-one of them.
+since 0.11.0: delegations, tokens sent and returned, median ratio, seconds per delegation, tokens
+per second and the share of findings that came without a line number (`sem nº`). It answers
+whether a `SHUNT_MODEL` switch paid off, and `--model NAME` isolates one of them.
 
 The rest shows decisions per tool, most-blocked files, and tokens delegated to Ollama against
 tokens returned to Claude.
@@ -572,6 +586,11 @@ language of the routing text the hooks inject.
 
 ## Changelog
 
+- **0.15.0** — the answer format is enforced by code: numbered lines are re-indented, a missing
+  path line is restored for a single source, and an answer with no line numbers is retried once
+  with a format reminder. `gemma4:e4b` copies the example one attribute at a time and was
+  returning findings the agent could not open; `qwen3.5:4b` was unaffected. The log gains
+  `findings=`, `numbered=` and `retries=`, and the model table a `sem nº` column.
 - **0.14.1** — files under `~/.claude/projects/*/tool-results/` are exempt, logged as
   `tool-result`: Claude Code parks a large tool output there for the model to read back, and
   denying that read left the model without the result it had just asked for.
