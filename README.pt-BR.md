@@ -526,6 +526,21 @@ flake8 --max-line-length=100 hooks/lib tests scripts/shunt-stats scripts/release
 shellcheck scripts/bulk-read scripts/lib/ollama.sh
 ```
 
+### Mantendo um clone em dia
+
+O repositório e o plugin instalado são duas cópias. O `git pull` atualiza a primeira; o Claude
+Code carrega os hooks da segunda, em `~/.claude/plugins/cache`, que só muda com
+`claude plugin update`. Esquecer o segundo passo significa editar um código que não é o código
+em execução.
+
+```bash
+scripts/sync
+```
+
+Ele busca do remoto, recusa rodar com a árvore suja ou com commits não enviados, avança direto
+(nunca faz merge, então uma divergência para para inspeção), roda os testes e reinstala o
+plugin. Reinicie o Claude Code depois, para os hooks novos valerem.
+
 ### Publicando uma versão
 
 Suba o `version` nos dois arquivos de `.claude-plugin/`, comite, faça push e então:

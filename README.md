@@ -521,6 +521,21 @@ flake8 --max-line-length=100 hooks/lib tests scripts/shunt-stats scripts/release
 shellcheck scripts/bulk-read scripts/lib/ollama.sh
 ```
 
+### Keeping a clone in sync
+
+The repository and the installed plugin are two copies. `git pull` updates the first; Claude
+Code loads its hooks from the second, under `~/.claude/plugins/cache`, which only changes with
+`claude plugin update`. Forgetting the second step means editing code that is not the code
+running.
+
+```bash
+scripts/sync
+```
+
+It fetches, refuses to run on a dirty tree or with unpushed commits, fast-forwards (never
+merges, so a divergence stops for inspection), runs the tests, and reinstalls the plugin.
+Restart Claude Code afterwards for the new hooks to take effect.
+
 ### Releasing a version
 
 Bump `version` in both files under `.claude-plugin/`, commit, push, then:

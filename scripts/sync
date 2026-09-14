@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Traz o repositório para o estado do remoto e reinstala o plugin a partir dele.
+#
+# São dois passos que sempre andam juntos e é fácil esquecer o segundo: o
+# `git pull` atualiza a origem, mas o Claude Code carrega os hooks de uma
+# cópia em ~/.claude/plugins/cache, que só muda com `claude plugin update`.
+set -euo pipefail
+
+cd "$(cd "$(dirname "$0")/.." && pwd)"
+PLUGIN="shunt-ollama@luizalabs-local"
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Erro: há alterações locais não commitadas. Comite ou guarde antes:" >&2
+  git status --short >&2
+  exit 1
+fi
+
+echo "== buscando do remoto"
+git fetch --tags --prune
+
+atras=$(git rev-list --count "HEAD..@{u}")
+frente=$(git rev-list --count "@{u}..HEAD")
+
+if [ "$frente" -gt 0 ]; then
+  echo "Erro: $frente commit(s) local(is) ainda não enviado(s). Faça push antes." >&2
+  git log --oneline "@{u}..HEAD" >&2
+  exit 1
+fi
+
+if [ "$atras" -eq 0 ]; then
+  echo "   já está em dia ($(git rev-parse --short HEAD))"
+else
+  echo "== aplicando $atras commit(s)"
+  git log --oneline "HEAD..@{u}" | sed 's/^/   /'
+  # --ff-only de propósito: se divergiu, é melhor parar e olhar.
+  git merge --ff-only "@{u}"
+fi
+
+echo "== validando"
+python3 -m unittest discover -s tests 2>&1 | tail -1 | sed 's/^/   /'
+
+echo "== reinstalando o plugin"
+claude plugin update "$PLUGIN" 2>&1 | tail -1 | sed 's/^/   /'
+
+echo "== pronto: $(jq -r .version .claude-plugin/plugin.json) em $(git rev-parse --short HEAD)"
+echo "   reinicie o Claude Code para os hooks novos valerem."
